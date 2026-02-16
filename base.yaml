@@ -2,9 +2,6 @@ env:
   time_scaling: 5.0
   noisy: false
 
-policy:
-  delay_ms: 0   # System 1 default (fast)
-
 training:
   learning_rate: 0.001
-  num_steps: 500
+  num_steps: 20
