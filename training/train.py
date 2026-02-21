@@ -1,107 +1,3 @@
-"""
-import time
-from envs import ShapeEnv
-from policies.policy import Policy
-
-def run_step(env, policy, name):
-    start = time.perf_counter()
-    observations, info = env.step(policy.act)
-    end = time.perf_counter()
-
-    print(f"\n{name}")
-    print(f"Policy time (ms): {info['actual_policy_time_ms']:.2f}")
-    print(f"Env steps taken: {info['num_environment_steps']}")
-    print(f"Total wall time (ms): {(end - start)*1000:.2f}")
-
-def main():
-    # Create ONE env and set time_scaling
-    env = ShapeEnv(time_scaling=5.0)
-
-    # Define policies
-    system1 = Policy(delay_ms=0)
-    system2 = Policy(delay_ms=20)
-
-    # Benchmark ONLY System 1 (single baseline)
-    env.benchmark_policy(system1.act)
-
-    # Evaluate both against the SAME baseline
-    env.reset()
-    run_step(env, system1, "System 1 (baseline)")
-
-    env.reset()
-    run_step(env, system2, "System 2 (slower vs baseline)")
-
-if __name__ == "__main__":
-    main()
-"""
-
-"""
-import torch
-from envs import ShapeEnv
-from models.cnn_encoder import CNNEncoder
-
-def main():
-    env = ShapeEnv()
-    obs = env.reset()  # shape: (1, 3, H, W)
-
-    print("Observation shape:", obs.shape)
-
-    model = CNNEncoder()
-    features = model(obs)
-
-    print("Feature shape:", features.shape)
-
-if __name__ == "__main__":
-    main()
-"""
-"""
-import torch
-from envs import ShapeEnv
-from models.cnn_encoder import CNNEncoder
-from models.policy_head import PolicyHead
-
-def main():
-    env = ShapeEnv()
-    obs = env.reset()
-
-    encoder = CNNEncoder()
-    features = encoder(obs)
-
-    print("Feature shape:", features.shape)
-
-    input_dim = features.shape[1]
-    head = PolicyHead(input_dim=input_dim)
-
-    logits = head(features)
-
-    print("Logits shape:", logits.shape)
-
-    action = torch.argmax(logits, dim=1)
-
-    print("Chosen action index:", action.item())
-
-if __name__ == "__main__":
-    main()
-"""
-'''
-from envs import ShapeEnv
-from policies.policy import Policy
-
-def main():
-    env = ShapeEnv()
-    policy = Policy(delay_ms=0)
-
-    obs = env.reset()
-    action = policy.act(obs)
-
-    print("Action:", action)
-    print("Action sum (should be 1):", action.sum())
-
-if __name__ == "__main__":
-    main()
-'''
-
-
 import argparse
 import shutil
 import json
@@ -110,15 +6,17 @@ import numpy as np
 import torch
 import yaml
 from pathlib import Path
+import os
+import sys
+
+print("[train.py] module loaded", flush=True)
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Shape AGI Training")
-
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output_dir", type=str, required=True)
-
     return parser.parse_args()
 
 
@@ -126,7 +24,6 @@ def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
@@ -137,11 +34,21 @@ def load_config(config_path):
 
 
 def main():
+    print("[train.py] ENTER main()", flush=True)
+    print("Python:", sys.executable, flush=True)
+    print("CWD:", os.getcwd(), flush=True)
+
     args = parse_args()
 
-    print("Config path:", args.config)
-    print("Seed:", args.seed)
-    print("Output directory:", args.output_dir)
+    print("Config path:", args.config, flush=True)
+    print("Seed:", args.seed, flush=True)
+    print("Output directory:", args.output_dir, flush=True)
+
+    # -------------------------
+    # Device setup (CUDA support)
+    # -------------------------
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Using device:", device, flush=True)
 
     # Create output directory
     output_path = Path(args.output_dir)
@@ -152,11 +59,11 @@ def main():
 
     # Set seed
     set_seed(args.seed)
-    print("Seed set.")
+    print("Seed set.", flush=True)
 
     # Load config
     config = load_config(args.config)
-    print("Loaded config:", config)
+    print("Loaded config:", config, flush=True)
 
     # -------------------------
     # Initialize ENV
@@ -167,11 +74,12 @@ def main():
     env = ShapeEnv(
         time_scaling=float(env_cfg.get("time_scaling", 1.0)),
         noisy=bool(env_cfg.get("noisy", False)),
-        random_initial=True   # ✅ ADDED
+        random_initial=True,
+        device=str(device)  # keep compatible if ShapeEnv expects string
     )
 
     print("Env initialized:",
-          {"time_scaling": env.time_scaling, "noisy": env.noisy})
+          {"time_scaling": env.time_scaling, "noisy": env.noisy}, flush=True)
 
     # -------------------------
     # Initialize POLICY
@@ -180,14 +88,15 @@ def main():
 
     policy_cfg = config.get("policy", {})
     policy = Policy(delay_ms=int(policy_cfg.get("delay_ms", 0)))
+    policy = policy.to(device)
 
     print("Policy initialized:",
-          {"delay_ms": policy.delay_ms})
+          {"delay_ms": policy.delay_ms}, flush=True)
 
     # -------------------------
     # Minimal Training Loop
     # -------------------------
-    print("\nStarting minimal training loop...")
+    print("\nStarting minimal training loop...", flush=True)
 
     learning_rate = config["training"]["learning_rate"]
     num_steps = config["training"]["num_steps"]
@@ -195,11 +104,9 @@ def main():
     optimizer = torch.optim.Adam(policy.parameters(), lr=learning_rate)
 
     total_reward = 0.0
-    obs = env.reset()
+    obs = env.reset().to(device)
 
     for step in range(num_steps):
-
-        # Forward pass
         features = policy.encoder(obs)
         logits = policy.head(features)
 
@@ -209,32 +116,31 @@ def main():
         action_index = dist.sample()
         log_prob = dist.log_prob(action_index)
 
-        # One-hot action
-        action = torch.zeros(5)
+        action = torch.zeros(5, device=device)
         action[action_index.item()] = 1.0
 
-        # Environment step (no real-time mode)
         next_obs = env._step_simulation(action)
+        next_obs = next_obs.unsqueeze(0).to(device)
 
-        # Reward: +1 if shape == triangle  ✅ CHANGED
         state = env._get_state()
         reward = 1.0 if state["shape"] == "triangle" else 0.0
-
         total_reward += reward
 
-        # REINFORCE loss
         loss = -log_prob * reward
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        # Update observation
-        obs = next_obs.unsqueeze(0)
+        obs = next_obs
 
-    print("Training finished.")
-    print("Total reward:", total_reward)
-    print("Setup complete.")
+        # tiny progress sanity
+        if (step + 1) % 100 == 0 or step == 0:
+            print(f"Step {step+1}/{num_steps} | total_reward={total_reward}", flush=True)
+
+    print("Training finished.", flush=True)
+    print("Total reward:", total_reward, flush=True)
+    print("Setup complete.", flush=True)
 
 
 if __name__ == "__main__":
