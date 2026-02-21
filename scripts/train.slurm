@@ -25,7 +25,7 @@ cd ~/shape_agi_project
 mkdir -p logs
 
 # Activate virtual environment
-source .venv/bin/activate
+source venv/bin/activate
 
 # Check GPU
 nvidia-smi
