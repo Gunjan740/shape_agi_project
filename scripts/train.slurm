@@ -34,7 +34,7 @@ echo "Running training..."
 
 python -m training.train \
   --config configs/base.yaml \
-  --seed 7 \
+  --seed 123 \
   --output_dir results/cluster_run_${SLURM_JOB_ID}
 
 echo "Job finished."
