@@ -9,7 +9,7 @@ from models.policy_head import PolicyHead
 class Policy(nn.Module):
     """
     Image-based policy using CNN encoder + MLP head.
-    Still no training — just forward inference.
+    Used for both training and evaluation.
     """
 
     def __init__(self, delay_ms: int = 0):
@@ -20,8 +20,7 @@ class Policy(nn.Module):
         # Build perception model
         self.encoder = CNNEncoder()
 
-        # We need to know feature size dynamically
-        # So we pass a dummy tensor once
+        # Dynamically determine feature dimension
         dummy_input = torch.zeros(1, 3, 144, 144)
         dummy_features = self.encoder(dummy_input)
         feature_dim = dummy_features.shape[1]
@@ -38,15 +37,16 @@ class Policy(nn.Module):
         if self.delay_ms > 0:
             time.sleep(self.delay_ms / 1000.0)
 
+        device = obs.device
+
         with torch.no_grad():
             features = self.encoder(obs)
             logits = self.head(features)
 
             action_index = torch.argmax(logits, dim=1)
 
-            # Convert to one-hot (size 5)
-            action = torch.zeros(5)
+            # One-hot action (size 5)
+            action = torch.zeros(5, device=device)
             action[action_index.item()] = 1.0
 
         return action
-
