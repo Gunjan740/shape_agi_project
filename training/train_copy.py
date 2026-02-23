@@ -75,7 +75,7 @@ def main():
         time_scaling=float(env_cfg.get("time_scaling", 1.0)),
         noisy=bool(env_cfg.get("noisy", False)),
         random_initial=True,
-        device=str(device)  # keep compatible if ShapeEnv expects string
+        device=str(device)
     )
 
     print("Env initialized:",
@@ -104,6 +104,8 @@ def main():
     optimizer = torch.optim.Adam(policy.parameters(), lr=learning_rate)
 
     total_reward = 0.0
+    reward_history = []  # ✅ ADDED
+
     obs = env.reset().to(device)
 
     for step in range(num_steps):
@@ -125,6 +127,7 @@ def main():
         state = env._get_state()
         reward = 1.0 if state["shape"] == "triangle" else 0.0
         total_reward += reward
+        reward_history.append(total_reward)  # ✅ ADDED
 
         loss = -log_prob * reward
 
@@ -134,12 +137,33 @@ def main():
 
         obs = next_obs
 
-        # tiny progress sanity
         if (step + 1) % 100 == 0 or step == 0:
             print(f"Step {step+1}/{num_steps} | total_reward={total_reward}", flush=True)
 
     print("Training finished.", flush=True)
     print("Total reward:", total_reward, flush=True)
+
+    # -------------------------
+    # Save Model & Metrics
+    # -------------------------
+
+    # Save model
+    torch.save(policy.state_dict(), output_path / "model.pt")
+
+    # Save metrics
+    metrics = {
+        "total_reward": total_reward,
+        "num_steps": num_steps,
+        "seed": args.seed
+    }
+
+    with open(output_path / "metrics.json", "w") as f:
+        json.dump(metrics, f, indent=2)
+
+    # Save reward curve
+    np.save(output_path / "reward_curve.npy", np.array(reward_history))
+
+    print("Model and metrics saved.", flush=True)
     print("Setup complete.", flush=True)
 
 

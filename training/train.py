@@ -44,30 +44,20 @@ def main():
     print("Seed:", args.seed, flush=True)
     print("Output directory:", args.output_dir, flush=True)
 
-    # -------------------------
-    # Device setup (CUDA support)
-    # -------------------------
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device, flush=True)
 
-    # Create output directory
     output_path = Path(args.output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # Copy config
     shutil.copy(args.config, output_path / "config.yaml")
 
-    # Set seed
     set_seed(args.seed)
     print("Seed set.", flush=True)
 
-    # Load config
     config = load_config(args.config)
     print("Loaded config:", config, flush=True)
 
-    # -------------------------
-    # Initialize ENV
-    # -------------------------
     from envs import ShapeEnv
 
     env_cfg = config.get("env", {})
@@ -81,9 +71,6 @@ def main():
     print("Env initialized:",
           {"time_scaling": env.time_scaling, "noisy": env.noisy}, flush=True)
 
-    # -------------------------
-    # Initialize POLICY
-    # -------------------------
     from policies.policy import Policy
 
     policy_cfg = config.get("policy", {})
@@ -93,9 +80,6 @@ def main():
     print("Policy initialized:",
           {"delay_ms": policy.delay_ms}, flush=True)
 
-    # -------------------------
-    # Minimal Training Loop
-    # -------------------------
     print("\nStarting minimal training loop...", flush=True)
 
     learning_rate = config["training"]["learning_rate"]
@@ -104,11 +88,19 @@ def main():
     optimizer = torch.optim.Adam(policy.parameters(), lr=learning_rate)
 
     total_reward = 0.0
-    reward_history = []  # ✅ ADDED
+    reward_history = []
 
     obs = env.reset().to(device)
 
+    # -------------------------
+    # NEW: Random target shape per episode
+    # -------------------------
+    possible_shapes = env.shapes_list  # assumes your env exposes this
+    target_shape = random.choice(possible_shapes)
+    print("Target shape for this episode:", target_shape, flush=True)
+
     for step in range(num_steps):
+
         features = policy.encoder(obs)
         logits = policy.head(features)
 
@@ -125,9 +117,14 @@ def main():
         next_obs = next_obs.unsqueeze(0).to(device)
 
         state = env._get_state()
-        reward = 1.0 if state["shape"] == "triangle" else 0.0
+
+        # -------------------------
+        # NEW: reward based on matching target
+        # -------------------------
+        reward = 1.0 if state["shape"] == target_shape else 0.0
+
         total_reward += reward
-        reward_history.append(total_reward)  # ✅ ADDED
+        reward_history.append(total_reward)
 
         loss = -log_prob * reward
 
@@ -143,24 +140,18 @@ def main():
     print("Training finished.", flush=True)
     print("Total reward:", total_reward, flush=True)
 
-    # -------------------------
-    # Save Model & Metrics
-    # -------------------------
-
-    # Save model
     torch.save(policy.state_dict(), output_path / "model.pt")
 
-    # Save metrics
     metrics = {
         "total_reward": total_reward,
         "num_steps": num_steps,
-        "seed": args.seed
+        "seed": args.seed,
+        "target_shape": target_shape
     }
 
     with open(output_path / "metrics.json", "w") as f:
         json.dump(metrics, f, indent=2)
 
-    # Save reward curve
     np.save(output_path / "reward_curve.npy", np.array(reward_history))
 
     print("Model and metrics saved.", flush=True)
