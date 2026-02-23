@@ -143,7 +143,7 @@ def main():
             optimizer.step()
 
             obs = next_obs
-
+        """
         if (episode + 1) % 10 == 0 or episode == 0:
             print(
                 f"Episode {episode+1}/{num_episodes} | "
@@ -151,6 +151,8 @@ def main():
                 f"total_reward={total_reward}",
                 flush=True
             )
+        """
+        print(f"Episode {episode+1} | episode_reward={episode_reward} | total_reward={total_reward}")
 
     print("Training finished.", flush=True)
     print("Total reward:", total_reward, flush=True)
