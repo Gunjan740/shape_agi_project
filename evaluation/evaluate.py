@@ -6,6 +6,7 @@ import yaml
 import json
 import time
 import numpy as np
+import random
 from pathlib import Path
 
 from envs import ShapeEnv
@@ -20,6 +21,7 @@ def parse_args():
     parser.add_argument("--delay_ms", type=int, default=0)
     parser.add_argument("--episodes", type=int, default=50)
     parser.add_argument("--steps_per_episode", type=int, default=10)
+    parser.add_argument("--seed", type=int, default=123)   # ✅ ADDED
     parser.add_argument("--output_dir", type=str, required=True)
 
     return parser.parse_args()
@@ -30,11 +32,23 @@ def load_config(path):
         return yaml.safe_load(f)
 
 
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 def main():
     args = parse_args()
 
+    # ✅ Set seed for fair comparison
+    set_seed(args.seed)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device, flush=True)
+    print("Evaluation seed:", args.seed, flush=True)
 
     config = load_config(args.config)
 
@@ -72,6 +86,8 @@ def main():
     for ep in range(args.episodes):
 
         obs = env.reset().to(device)
+
+        # deterministic across runs due to seed
         target_shape = np.random.choice(possible_shapes)
 
         episode_success = False
@@ -121,7 +137,8 @@ def main():
         "success_rate": success_rate,
         "avg_compute_time_ms": avg_compute_time_ms,
         "delay_ms": args.delay_ms,
-        "episodes": args.episodes
+        "episodes": args.episodes,
+        "seed": args.seed
     }
 
     with open(output_path / "eval_metrics.json", "w") as f:
