@@ -58,6 +58,9 @@ def main():
     config = load_config(args.config)
     print("Loaded config:", config, flush=True)
 
+    # -------------------------
+    # Initialize ENV
+    # -------------------------
     from envs import ShapeEnv
 
     env_cfg = config.get("env", {})
@@ -71,6 +74,9 @@ def main():
     print("Env initialized:",
           {"time_scaling": env.time_scaling, "noisy": env.noisy}, flush=True)
 
+    # -------------------------
+    # Initialize POLICY
+    # -------------------------
     from policies.policy import Policy
 
     policy_cfg = config.get("policy", {})
@@ -80,73 +86,84 @@ def main():
     print("Policy initialized:",
           {"delay_ms": policy.delay_ms}, flush=True)
 
-    print("\nStarting minimal training loop...", flush=True)
+    # -------------------------
+    # Episodic Training Loop
+    # -------------------------
+    print("\nStarting episodic training loop...", flush=True)
 
     learning_rate = config["training"]["learning_rate"]
     num_steps = config["training"]["num_steps"]
 
     optimizer = torch.optim.Adam(policy.parameters(), lr=learning_rate)
 
+    steps_per_episode = 10
+    num_episodes = num_steps // steps_per_episode
+
     total_reward = 0.0
     reward_history = []
 
-    obs = env.reset().to(device)
+    possible_shapes = env.shapes_list
 
-    # -------------------------
-    # NEW: Random target shape per episode
-    # -------------------------
-    possible_shapes = env.shapes_list  # assumes your env exposes this
-    target_shape = random.choice(possible_shapes)
-    print("Target shape for this episode:", target_shape, flush=True)
+    for episode in range(num_episodes):
 
-    for step in range(num_steps):
+        obs = env.reset().to(device)
 
-        features = policy.encoder(obs)
-        logits = policy.head(features)
+        target_shape = random.choice(possible_shapes)
 
-        probs = torch.softmax(logits, dim=1)
-        dist = torch.distributions.Categorical(probs)
+        episode_reward = 0.0
 
-        action_index = dist.sample()
-        log_prob = dist.log_prob(action_index)
+        for step in range(steps_per_episode):
 
-        action = torch.zeros(5, device=device)
-        action[action_index.item()] = 1.0
+            features = policy.encoder(obs)
+            logits = policy.head(features)
 
-        next_obs = env._step_simulation(action)
-        next_obs = next_obs.unsqueeze(0).to(device)
+            probs = torch.softmax(logits, dim=1)
+            dist = torch.distributions.Categorical(probs)
 
-        state = env._get_state()
+            action_index = dist.sample()
+            log_prob = dist.log_prob(action_index)
 
-        # -------------------------
-        # NEW: reward based on matching target
-        # -------------------------
-        reward = 1.0 if state["shape"] == target_shape else 0.0
+            action = torch.zeros(5, device=device)
+            action[action_index.item()] = 1.0
 
-        total_reward += reward
-        reward_history.append(total_reward)
+            next_obs = env._step_simulation(action)
+            next_obs = next_obs.unsqueeze(0).to(device)
 
-        loss = -log_prob * reward
+            state = env._get_state()
+            reward = 1.0 if state["shape"] == target_shape else 0.0
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+            episode_reward += reward
+            total_reward += reward
+            reward_history.append(total_reward)
 
-        obs = next_obs
+            loss = -log_prob * reward
 
-        if (step + 1) % 100 == 0 or step == 0:
-            print(f"Step {step+1}/{num_steps} | total_reward={total_reward}", flush=True)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            obs = next_obs
+
+        if (episode + 1) % 10 == 0 or episode == 0:
+            print(
+                f"Episode {episode+1}/{num_episodes} | "
+                f"episode_reward={episode_reward} | "
+                f"total_reward={total_reward}",
+                flush=True
+            )
 
     print("Training finished.", flush=True)
     print("Total reward:", total_reward, flush=True)
 
+    # -------------------------
+    # Save Model & Metrics
+    # -------------------------
     torch.save(policy.state_dict(), output_path / "model.pt")
 
     metrics = {
         "total_reward": total_reward,
         "num_steps": num_steps,
-        "seed": args.seed,
-        "target_shape": target_shape
+        "seed": args.seed
     }
 
     with open(output_path / "metrics.json", "w") as f:
