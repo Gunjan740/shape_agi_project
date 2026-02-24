@@ -85,6 +85,28 @@ def main():
 
     print("\nStarting evaluation...\n", flush=True)
 
+    # -------------------------
+    # Real-time requirement: benchmark policy once
+    # -------------------------
+    def benchmark_policy_fn(state):
+        state = state.to(device)
+
+        if state.dim() == 3:
+            state = state.unsqueeze(0)
+        elif state.dim() == 4:
+            if state.size(0) != 1:
+                state = state[-1].unsqueeze(0)
+        elif state.dim() == 5:
+            state = state[:, -1, ...]
+        else:
+            raise ValueError(f"Unexpected state shape: {state.shape}")
+
+        with torch.no_grad():
+            return policy.act(state)
+
+    env.benchmark_policy(benchmark_policy_fn)
+    print("Real-time benchmark done.", flush=True)
+
     for ep in range(args.episodes):
 
         obs = env.reset().to(device)
@@ -128,7 +150,8 @@ def main():
                     raise ValueError(f"Unexpected state shape: {state.shape}")
 
                 start_time = time.time()
-                action = policy.act(state)
+                with torch.no_grad():
+                    action = policy.act(state)
                 compute_times.append(time.time() - start_time)
 
                 return action
@@ -145,7 +168,10 @@ def main():
         if episode_success:
             success_count += 1
 
-        print(f"Episode {ep+1}/{args.episodes} | success={episode_success}", flush=True)
+        print(
+            f"Episode {ep+1}/{args.episodes} | success={episode_success}",
+            flush=True,
+        )
 
     # -------------------------
     # Metrics
