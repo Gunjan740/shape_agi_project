@@ -21,7 +21,7 @@ def parse_args():
     parser.add_argument("--delay_ms", type=int, default=0)
     parser.add_argument("--episodes", type=int, default=50)
     parser.add_argument("--steps_per_episode", type=int, default=10)
-    parser.add_argument("--seed", type=int, default=123)   # ✅ ADDED
+    parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--output_dir", type=str, required=True)
 
     return parser.parse_args()
@@ -43,7 +43,9 @@ def set_seed(seed):
 def main():
     args = parse_args()
 
-    # ✅ Set seed for fair comparison
+    # -------------------------
+    # Seed
+    # -------------------------
     set_seed(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -53,7 +55,7 @@ def main():
     config = load_config(args.config)
 
     # -------------------------
-    # Initialize environment (REAL-TIME MODE)
+    # Environment (REAL-TIME MODE)
     # -------------------------
     env_cfg = config.get("env", {})
 
@@ -86,22 +88,26 @@ def main():
     for ep in range(args.episodes):
 
         obs = env.reset().to(device)
-
-        # deterministic across runs due to seed
         target_shape = np.random.choice(possible_shapes)
 
         episode_success = False
 
         for step in range(args.steps_per_episode):
 
-            start_time = time.time()
+            # -------------------------
+            # Real-time policy wrapper
+            # -------------------------
+            def policy_fn(state):
+                state = state.unsqueeze(0).to(device)
 
-            action = policy.act(obs)
+                start_time = time.time()
+                action = policy.act(state)
+                compute_times.append(time.time() - start_time)
 
-            compute_times.append(time.time() - start_time)
+                return action
 
             # REAL-TIME COUPLED STEP
-            obs = env.step(action)
+            obs = env.step(policy_fn)
             obs = obs.unsqueeze(0).to(device)
 
             state = env._get_state()
