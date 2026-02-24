@@ -63,7 +63,7 @@ def main():
         time_scaling=float(env_cfg.get("time_scaling", 1.0)),
         noisy=bool(env_cfg.get("noisy", False)),
         random_initial=True,
-        device=str(device)
+        device=str(device),
     )
 
     print("Environment ready.", flush=True)
@@ -98,7 +98,34 @@ def main():
             # Real-time policy wrapper
             # -------------------------
             def policy_fn(state):
-                state = state.unsqueeze(0).to(device)
+                """
+                Accepts state in shapes:
+                  (3, H, W)
+                  (1, 3, H, W)
+                  (T, 3, H, W)
+                  (1, T, 3, H, W)
+
+                Always converts to:
+                  (1, 3, H, W)
+                """
+                state = state.to(device)
+
+                # Case 1: (3, H, W)
+                if state.dim() == 3:
+                    state = state.unsqueeze(0)
+
+                # Case 2: (T, 3, H, W) OR already (1, 3, H, W)
+                elif state.dim() == 4:
+                    if state.size(0) != 1:
+                        # assume time stack -> take latest frame
+                        state = state[-1].unsqueeze(0)
+
+                # Case 3: (1, T, 3, H, W)
+                elif state.dim() == 5:
+                    state = state[:, -1, ...]
+
+                else:
+                    raise ValueError(f"Unexpected state shape: {state.shape}")
 
                 start_time = time.time()
                 action = policy.act(state)
@@ -118,10 +145,7 @@ def main():
         if episode_success:
             success_count += 1
 
-        print(
-            f"Episode {ep+1}/{args.episodes} | success={episode_success}",
-            flush=True
-        )
+        print(f"Episode {ep+1}/{args.episodes} | success={episode_success}", flush=True)
 
     # -------------------------
     # Metrics
@@ -144,7 +168,7 @@ def main():
         "avg_compute_time_ms": avg_compute_time_ms,
         "delay_ms": args.delay_ms,
         "episodes": args.episodes,
-        "seed": args.seed
+        "seed": args.seed,
     }
 
     with open(output_path / "eval_metrics.json", "w") as f:
