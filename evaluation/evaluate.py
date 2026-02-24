@@ -40,6 +40,27 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
+def _to_policy_input(state, device):
+    """
+    Normalize incoming state to (1, 3, H, W) for CNN.
+    Handles:
+      (3,H,W), (1,3,H,W), (T,3,H,W), (1,T,3,H,W)
+    """
+    state = state.to(device)
+
+    if state.dim() == 3:
+        state = state.unsqueeze(0)
+    elif state.dim() == 4:
+        if state.size(0) != 1:
+            state = state[-1].unsqueeze(0)
+    elif state.dim() == 5:
+        state = state[:, -1, ...]
+    else:
+        raise ValueError(f"Unexpected state shape: {state.shape}")
+
+    return state
+
+
 def main():
     args = parse_args()
 
@@ -89,18 +110,7 @@ def main():
     # Real-time requirement: benchmark policy once
     # -------------------------
     def benchmark_policy_fn(state):
-        state = state.to(device)
-
-        if state.dim() == 3:
-            state = state.unsqueeze(0)
-        elif state.dim() == 4:
-            if state.size(0) != 1:
-                state = state[-1].unsqueeze(0)
-        elif state.dim() == 5:
-            state = state[:, -1, ...]
-        else:
-            raise ValueError(f"Unexpected state shape: {state.shape}")
-
+        state = _to_policy_input(state, device)
         with torch.no_grad():
             return policy.act(state)
 
@@ -120,34 +130,7 @@ def main():
             # Real-time policy wrapper
             # -------------------------
             def policy_fn(state):
-                """
-                Accepts state in shapes:
-                  (3, H, W)
-                  (1, 3, H, W)
-                  (T, 3, H, W)
-                  (1, T, 3, H, W)
-
-                Always converts to:
-                  (1, 3, H, W)
-                """
-                state = state.to(device)
-
-                # Case 1: (3, H, W)
-                if state.dim() == 3:
-                    state = state.unsqueeze(0)
-
-                # Case 2: (T, 3, H, W) OR already (1, 3, H, W)
-                elif state.dim() == 4:
-                    if state.size(0) != 1:
-                        # assume time stack -> take latest frame
-                        state = state[-1].unsqueeze(0)
-
-                # Case 3: (1, T, 3, H, W)
-                elif state.dim() == 5:
-                    state = state[:, -1, ...]
-
-                else:
-                    raise ValueError(f"Unexpected state shape: {state.shape}")
+                state = _to_policy_input(state, device)
 
                 start_time = time.time()
                 with torch.no_grad():
@@ -157,8 +140,15 @@ def main():
                 return action
 
             # REAL-TIME COUPLED STEP
-            obs = env.step(policy_fn)
-            obs = obs.unsqueeze(0).to(device)
+            step_out = env.step(policy_fn)
+
+            # realtime env returns (obs, info)
+            if isinstance(step_out, tuple):
+                obs, info = step_out
+            else:
+                obs, info = step_out, None
+
+            obs = obs.to(device)
 
             state = env._get_state()
 
