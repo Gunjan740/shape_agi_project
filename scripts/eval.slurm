@@ -19,7 +19,7 @@ module load devel/python/3.10
 
 cd ~/shape_agi_project
 
-mkdir -p logs_eval
+mkdir -p logs
 
 source venv/bin/activate
 
