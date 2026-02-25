@@ -136,12 +136,17 @@ def main():
 
             state = env._get_state()
 
-            # FULL LATENT REWARD
-            reward = 1.0 if (
-                state["shape"] == target_shape and
-                state["color"] == target_color and
-                state["size"]  == target_size
-            ) else 0.0
+            # FULL LATENT REWARD (Minimal Reward Shaping)
+            reward = 0.0
+
+            if state["shape"] == target_shape:
+                reward += 0.33
+            if state["color"] == target_color:
+                reward += 0.33
+            if state["size"] == target_size:
+                reward += 0.34
+
+            
 
             episode_reward += reward
             total_reward += reward
