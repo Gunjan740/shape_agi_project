@@ -35,7 +35,7 @@ python -m evaluation.evaluate \
   --config configs/base.yaml \
   --model_path ${MODEL_PATH} \
   --delay_ms ${DELAY_MS} \
-  --episodes 500 \
+  --episodes 200 \
   --steps_per_episode 30 \
   --seed ${SEED} \
   --output_dir results/eval_delay_${DELAY_MS}_seed_${SEED}_${SLURM_JOB_ID}
