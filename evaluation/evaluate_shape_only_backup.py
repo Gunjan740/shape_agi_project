@@ -41,6 +41,11 @@ def set_seed(seed):
 
 
 def _to_policy_input(state, device):
+    """
+    Normalize incoming state to (1, 3, H, W) for CNN.
+    Handles:
+      (3,H,W), (1,3,H,W), (T,3,H,W), (1,T,3,H,W)
+    """
     state = state.to(device)
 
     if state.dim() == 3:
@@ -59,6 +64,9 @@ def _to_policy_input(state, device):
 def main():
     args = parse_args()
 
+    # -------------------------
+    # Seed
+    # -------------------------
     set_seed(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -67,6 +75,9 @@ def main():
 
     config = load_config(args.config)
 
+    # -------------------------
+    # Environment (REAL-TIME MODE)
+    # -------------------------
     env_cfg = config.get("env", {})
 
     env = ShapeEnv(
@@ -78,6 +89,9 @@ def main():
 
     print("Environment ready.", flush=True)
 
+    # -------------------------
+    # Load trained model
+    # -------------------------
     policy = Policy(delay_ms=args.delay_ms)
     policy.load_state_dict(torch.load(args.model_path, map_location=device))
     policy = policy.to(device)
@@ -89,12 +103,12 @@ def main():
     compute_times = []
 
     possible_shapes = env.shapes_list
-    possible_colors = env.colors_list
-    possible_sizes = env.sizes_list
 
     print("\nStarting evaluation...\n", flush=True)
 
-    # ---- Real-time benchmark ----
+    # -------------------------
+    # Real-time requirement: benchmark policy once
+    # -------------------------
     def benchmark_policy_fn(state):
         state = _to_policy_input(state, device)
         with torch.no_grad():
@@ -106,16 +120,15 @@ def main():
     for ep in range(args.episodes):
 
         obs = env.reset().to(device)
-
-        # FULL LATENT TARGET
         target_shape = np.random.choice(possible_shapes)
-        target_color = np.random.choice(possible_colors)
-        target_size  = np.random.choice(possible_sizes)
 
         episode_success = False
 
         for step in range(args.steps_per_episode):
 
+            # -------------------------
+            # Real-time policy wrapper
+            # -------------------------
             def policy_fn(state):
                 state = _to_policy_input(state, device)
 
@@ -126,8 +139,10 @@ def main():
 
                 return action
 
+            # REAL-TIME COUPLED STEP
             step_out = env.step(policy_fn)
 
+            # realtime env returns (obs, info)
             if isinstance(step_out, tuple):
                 obs, info = step_out
             else:
@@ -137,12 +152,7 @@ def main():
 
             state = env._get_state()
 
-            # FULL LATENT SUCCESS CHECK
-            if (
-                state["shape"] == target_shape and
-                state["color"] == target_color and
-                state["size"]  == target_size
-            ):
+            if state["shape"] == target_shape:
                 episode_success = True
 
         if episode_success:
@@ -153,6 +163,9 @@ def main():
             flush=True,
         )
 
+    # -------------------------
+    # Metrics
+    # -------------------------
     success_rate = success_count / args.episodes
     avg_compute_time_ms = np.mean(compute_times) * 1000
 
@@ -160,6 +173,9 @@ def main():
     print("Success rate:", success_rate)
     print("Avg compute time (ms):", avg_compute_time_ms)
 
+    # -------------------------
+    # Save results
+    # -------------------------
     output_path = Path(args.output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
