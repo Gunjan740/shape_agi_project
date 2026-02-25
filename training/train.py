@@ -139,12 +139,19 @@ def main():
             # FULL LATENT REWARD (Minimal Reward Shaping)
             reward = 0.0
 
-            if state["shape"] == target_shape:
-                reward += 0.33
-            if state["color"] == target_color:
-                reward += 0.33
-            if state["size"] == target_size:
-                reward += 0.34
+            if (
+                state["shape"] == target_shape and
+                state["color"] == target_color and
+                state["size"]  == target_size
+                ):
+                    reward = 2.0   # strong full-match signal
+            else:
+                if state["shape"] == target_shape:
+                    reward += 0.3
+                if state["color"] == target_color:
+                    reward += 0.3
+                if state["size"] == target_size:
+                    reward += 0.4
 
             
 
