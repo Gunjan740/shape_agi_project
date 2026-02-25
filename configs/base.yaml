@@ -7,4 +7,4 @@ policy:
 
 training:
   learning_rate: 0.001
-  num_steps: 500
+  num_steps: 3000
