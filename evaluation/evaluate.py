@@ -109,6 +109,11 @@ def main():
 
     print("Model loaded.", flush=True)
 
+    print("MODEL_PATH:", args.model_path, flush=True)
+    first_param = next(policy.parameters()).detach().float().mean().item()
+    print("MODEL_PARAM_MEAN:", first_param, flush=True)
+    print("GOAL_DIM:", policy.goal_dim, flush=True)
+
     success_count = 0
     compute_times = []
 
