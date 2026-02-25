@@ -40,7 +40,6 @@ def make_goal_vec(target_shape, target_color, target_size, shape_to_i, color_to_
     ci = color_to_i[target_color]
     zi = size_to_i[target_size]
 
-    # layout: [shapes | colors | sizes]
     g[0, si] = 1.0
     g[0, len(shape_to_i) + ci] = 1.0
     g[0, len(shape_to_i) + len(color_to_i) + zi] = 1.0
@@ -54,12 +53,7 @@ def main():
 
     args = parse_args()
 
-    print("Config path:", args.config, flush=True)
-    print("Seed:", args.seed, flush=True)
-    print("Output directory:", args.output_dir, flush=True)
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("Using device:", device, flush=True)
 
     output_path = Path(args.output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -67,16 +61,9 @@ def main():
     shutil.copy(args.config, output_path / "config.yaml")
 
     set_seed(args.seed)
-    print("Seed set.", flush=True)
-
     config = load_config(args.config)
-    print("Loaded config:", config, flush=True)
 
-    # -------------------------
-    # Initialize ENV
-    # -------------------------
     from envs import ShapeEnv
-
     env_cfg = config.get("env", {})
     env = ShapeEnv(
         time_scaling=float(env_cfg.get("time_scaling", 1.0)),
@@ -85,12 +72,6 @@ def main():
         device=str(device)
     )
 
-    print("Env initialized:",
-          {"time_scaling": env.time_scaling, "noisy": env.noisy}, flush=True)
-
-    # -------------------------
-    # Goal dims (from env lists)
-    # -------------------------
     possible_shapes = env.shapes_list
     possible_colors = env.colors_list
     possible_sizes = env.sizes_list
@@ -101,22 +82,10 @@ def main():
 
     goal_dim = len(possible_shapes) + len(possible_colors) + len(possible_sizes)
 
-    # -------------------------
-    # Initialize POLICY
-    # -------------------------
     from policies.policy import Policy
-
     policy_cfg = config.get("policy", {})
     policy = Policy(delay_ms=int(policy_cfg.get("delay_ms", 0)), goal_dim=goal_dim)
     policy = policy.to(device)
-
-    print("Policy initialized:",
-          {"delay_ms": policy.delay_ms, "goal_dim": policy.goal_dim}, flush=True)
-
-    # -------------------------
-    # Episodic Training Loop
-    # -------------------------
-    print("\nStarting episodic training loop...", flush=True)
 
     learning_rate = config["training"]["learning_rate"]
     num_steps = config["training"]["num_steps"]
@@ -129,11 +98,16 @@ def main():
     total_reward = 0.0
     reward_history = []
 
+    # ✅ Step 1: Moving baseline
+    baseline = 0.0
+    beta = 0.9
+
+    print("\nStarting episodic training loop...", flush=True)
+
     for episode in range(num_episodes):
 
         obs = env.reset().to(device)
 
-        # sample FULL target
         target_shape = random.choice(possible_shapes)
         target_color = random.choice(possible_colors)
         target_size  = random.choice(possible_sizes)
@@ -145,6 +119,7 @@ def main():
         )
 
         episode_reward = 0.0
+        episode_hit = False  # ✅ Step 3: track strict success
 
         for step in range(steps_per_episode):
 
@@ -166,28 +141,32 @@ def main():
 
             state = env._get_state()
 
-            # IMPORTANT: keep YOUR reward logic here (the latest one you are using)
-            # Example (full match has bigger weight + partial shaping):
+            # ✅ Step 2: Stronger strict reward
             if (
                 state["shape"] == target_shape and
                 state["color"] == target_color and
                 state["size"]  == target_size
             ):
-                reward = 2.0
+                reward = 3.0
+                episode_hit = True
             else:
                 reward = 0.0
                 if state["shape"] == target_shape:
-                    reward += 0.3
+                    reward += 0.2
                 if state["color"] == target_color:
-                    reward += 0.3
+                    reward += 0.2
                 if state["size"] == target_size:
-                    reward += 0.4
+                    reward += 0.3
 
             episode_reward += reward
             total_reward += reward
             reward_history.append(total_reward)
 
-            loss = -log_prob * reward
+            # ✅ Step 1: Advantage with baseline
+            advantage = reward - baseline
+            baseline = beta * baseline + (1 - beta) * reward
+
+            loss = -log_prob * advantage
 
             optimizer.zero_grad()
             loss.backward()
@@ -195,14 +174,17 @@ def main():
 
             obs = next_obs
 
+        # ✅ Step 3: Episodic strict bonus
+        if episode_hit:
+            bonus = 5.0
+            total_reward += bonus
+            reward_history.append(total_reward)
+
         print(f"Episode {episode+1} | episode_reward={episode_reward} | total_reward={total_reward}")
 
-    print("Training finished.", flush=True)
-    print("Total reward:", total_reward, flush=True)
+    print("Training finished.")
+    print("Total reward:", total_reward)
 
-    # -------------------------
-    # Save Model & Metrics
-    # -------------------------
     torch.save(policy.state_dict(), output_path / "model.pt")
 
     metrics = {
@@ -216,8 +198,8 @@ def main():
 
     np.save(output_path / "reward_curve.npy", np.array(reward_history))
 
-    print("Model and metrics saved.", flush=True)
-    print("Setup complete.", flush=True)
+    print("Model and metrics saved.")
+    print("Setup complete.")
 
 
 if __name__ == "__main__":
