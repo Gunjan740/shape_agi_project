@@ -103,17 +103,12 @@ def main():
     reward_history = []
 
     possible_shapes = env.shapes_list
-    possible_colors = env.colors_list
-    possible_sizes = env.sizes_list
 
     for episode in range(num_episodes):
 
         obs = env.reset().to(device)
 
-        # FULL LATENT TARGET
         target_shape = random.choice(possible_shapes)
-        target_color = random.choice(possible_colors)
-        target_size  = random.choice(possible_sizes)
 
         episode_reward = 0.0
 
@@ -135,13 +130,7 @@ def main():
             next_obs = next_obs.unsqueeze(0).to(device)
 
             state = env._get_state()
-
-            # FULL LATENT REWARD
-            reward = 1.0 if (
-                state["shape"] == target_shape and
-                state["color"] == target_color and
-                state["size"]  == target_size
-            ) else 0.0
+            reward = 1.0 if state["shape"] == target_shape else 0.0
 
             episode_reward += reward
             total_reward += reward
@@ -154,7 +143,15 @@ def main():
             optimizer.step()
 
             obs = next_obs
-
+        """
+        if (episode + 1) % 10 == 0 or episode == 0:
+            print(
+                f"Episode {episode+1}/{num_episodes} | "
+                f"episode_reward={episode_reward} | "
+                f"total_reward={total_reward}",
+                flush=True
+            )
+        """
         print(f"Episode {episode+1} | episode_reward={episode_reward} | total_reward={total_reward}")
 
     print("Training finished.", flush=True)
