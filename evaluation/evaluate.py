@@ -56,7 +56,16 @@ def _to_policy_input(state, device):
     return state
 
 
-def make_goal_vec(target_shape, target_color, target_size, shape_to_i, color_to_i, size_to_i, goal_dim, device):
+def make_goal_vec(
+    target_shape,
+    target_color,
+    target_size,
+    shape_to_i,
+    color_to_i,
+    size_to_i,
+    goal_dim,
+    device,
+):
     g = torch.zeros(1, goal_dim, device=device)
 
     si = shape_to_i[target_shape]
@@ -91,14 +100,14 @@ def main():
 
     print("Environment ready.", flush=True)
 
-    # goal dims from env lists
+    # ---- goal dims from env lists ----
     possible_shapes = env.shapes_list
     possible_colors = env.colors_list
-    possible_sizes  = env.sizes_list
+    possible_sizes = env.sizes_list
 
     shape_to_i = {s: i for i, s in enumerate(possible_shapes)}
     color_to_i = {c: i for i, c in enumerate(possible_colors)}
-    size_to_i  = {z: i for i, z in enumerate(possible_sizes)}
+    size_to_i = {z: i for i, z in enumerate(possible_sizes)}
 
     goal_dim = len(possible_shapes) + len(possible_colors) + len(possible_sizes)
 
@@ -119,8 +128,15 @@ def main():
 
     print("\nStarting evaluation...\n", flush=True)
 
+    # ---- Pre-generate targets so System1 vs System2 are comparable ----
+    targets = []
+    for _ in range(args.episodes):
+        t_shape = np.random.choice(possible_shapes)
+        t_color = np.random.choice(possible_colors)
+        t_size = np.random.choice(possible_sizes)
+        targets.append((t_shape, t_color, t_size))
+
     # ---- Real-time benchmark ----
-    # Use a dummy goal for benchmark (shape doesn't matter; it just calibrates runtime)
     dummy_goal = torch.zeros(1, goal_dim, device=device)
 
     def benchmark_policy_fn(state):
@@ -135,22 +151,63 @@ def main():
 
         obs = env.reset().to(device)
 
-        target_shape = np.random.choice(possible_shapes)
-        target_color = np.random.choice(possible_colors)
-        target_size  = np.random.choice(possible_sizes)
+        target_shape, target_color, target_size = targets[ep]
 
         goal_vec = make_goal_vec(
-            target_shape, target_color, target_size,
-            shape_to_i, color_to_i, size_to_i,
-            goal_dim, device
+            target_shape,
+            target_color,
+            target_size,
+            shape_to_i,
+            color_to_i,
+            size_to_i,
+            goal_dim,
+            device,
         )
 
+        # ---- One-time debug checks (goal correctness + goal sensitivity) ----
+        if ep == 0:
+            print(
+                "DEBUG goal_sum:",
+                float(goal_vec.sum().item()),
+                "goal_nonzero:",
+                int((goal_vec > 0).sum().item()),
+                flush=True,
+            )
+
         episode_success = False
+        did_goal_sensitivity_check = False
 
         for step in range(args.steps_per_episode):
 
             def policy_fn(state):
+                nonlocal did_goal_sensitivity_check
+
                 state = _to_policy_input(state, device)
+
+                # One-time goal sensitivity test on first episode/first step
+                if ep == 0 and (not did_goal_sensitivity_check):
+                    with torch.no_grad():
+                        feat = policy.encoder(state)
+
+                        alt_shape = possible_shapes[(shape_to_i[target_shape] + 1) % len(possible_shapes)]
+                        g2 = make_goal_vec(
+                            alt_shape,
+                            target_color,
+                            target_size,
+                            shape_to_i,
+                            color_to_i,
+                            size_to_i,
+                            goal_dim,
+                            device,
+                        )
+
+                        logits1 = policy.head(torch.cat([feat, goal_vec], dim=1))
+                        logits2 = policy.head(torch.cat([feat, g2], dim=1))
+                        diff = (logits1 - logits2).abs().mean().item()
+
+                        print("GOAL_SENSITIVITY_MEAN_ABS_LOGIT_DIFF:", diff, flush=True)
+
+                    did_goal_sensitivity_check = True
 
                 start_time = time.time()
                 with torch.no_grad():
@@ -171,19 +228,16 @@ def main():
             state = env._get_state()
 
             if (
-                state["shape"] == target_shape and
-                state["color"] == target_color and
-                state["size"]  == target_size
+                state["shape"] == target_shape
+                and state["color"] == target_color
+                and state["size"] == target_size
             ):
                 episode_success = True
 
         if episode_success:
             success_count += 1
 
-        print(
-            f"Episode {ep+1}/{args.episodes} | success={episode_success}",
-            flush=True,
-        )
+        print(f"Episode {ep+1}/{args.episodes} | success={episode_success}", flush=True)
 
     success_rate = success_count / args.episodes
     avg_compute_time_ms = np.mean(compute_times) * 1000
@@ -202,6 +256,7 @@ def main():
         "episodes": args.episodes,
         "steps_per_episode": args.steps_per_episode,
         "seed": args.seed,
+        "goal_dim": goal_dim,
     }
 
     with open(output_path / "eval_metrics.json", "w") as f:
