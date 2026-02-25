@@ -56,19 +56,6 @@ def _to_policy_input(state, device):
     return state
 
 
-def make_goal_vec(target_shape, target_color, target_size, shape_to_i, color_to_i, size_to_i, goal_dim, device):
-    g = torch.zeros(1, goal_dim, device=device)
-
-    si = shape_to_i[target_shape]
-    ci = color_to_i[target_color]
-    zi = size_to_i[target_size]
-
-    g[0, si] = 1.0
-    g[0, len(shape_to_i) + ci] = 1.0
-    g[0, len(shape_to_i) + len(color_to_i) + zi] = 1.0
-    return g
-
-
 def main():
     args = parse_args()
 
@@ -91,18 +78,7 @@ def main():
 
     print("Environment ready.", flush=True)
 
-    # goal dims from env lists
-    possible_shapes = env.shapes_list
-    possible_colors = env.colors_list
-    possible_sizes  = env.sizes_list
-
-    shape_to_i = {s: i for i, s in enumerate(possible_shapes)}
-    color_to_i = {c: i for i, c in enumerate(possible_colors)}
-    size_to_i  = {z: i for i, z in enumerate(possible_sizes)}
-
-    goal_dim = len(possible_shapes) + len(possible_colors) + len(possible_sizes)
-
-    policy = Policy(delay_ms=args.delay_ms, goal_dim=goal_dim)
+    policy = Policy(delay_ms=args.delay_ms)
     policy.load_state_dict(torch.load(args.model_path, map_location=device))
     policy = policy.to(device)
     policy.eval()
@@ -112,16 +88,17 @@ def main():
     success_count = 0
     compute_times = []
 
+    possible_shapes = env.shapes_list
+    possible_colors = env.colors_list
+    possible_sizes = env.sizes_list
+
     print("\nStarting evaluation...\n", flush=True)
 
     # ---- Real-time benchmark ----
-    # Use a dummy goal for benchmark (shape doesn't matter; it just calibrates runtime)
-    dummy_goal = torch.zeros(1, goal_dim, device=device)
-
     def benchmark_policy_fn(state):
         state = _to_policy_input(state, device)
         with torch.no_grad():
-            return policy.act(state, dummy_goal)
+            return policy.act(state)
 
     env.benchmark_policy(benchmark_policy_fn)
     print("Real-time benchmark done.", flush=True)
@@ -130,15 +107,10 @@ def main():
 
         obs = env.reset().to(device)
 
+        # FULL LATENT TARGET
         target_shape = np.random.choice(possible_shapes)
         target_color = np.random.choice(possible_colors)
         target_size  = np.random.choice(possible_sizes)
-
-        goal_vec = make_goal_vec(
-            target_shape, target_color, target_size,
-            shape_to_i, color_to_i, size_to_i,
-            goal_dim, device
-        )
 
         episode_success = False
 
@@ -149,7 +121,7 @@ def main():
 
                 start_time = time.time()
                 with torch.no_grad():
-                    action = policy.act(state, goal_vec)
+                    action = policy.act(state)
                 compute_times.append(time.time() - start_time)
 
                 return action
@@ -165,6 +137,7 @@ def main():
 
             state = env._get_state()
 
+            # FULL LATENT SUCCESS CHECK
             if (
                 state["shape"] == target_shape and
                 state["color"] == target_color and
@@ -195,7 +168,6 @@ def main():
         "avg_compute_time_ms": avg_compute_time_ms,
         "delay_ms": args.delay_ms,
         "episodes": args.episodes,
-        "steps_per_episode": args.steps_per_episode,
         "seed": args.seed,
     }
 

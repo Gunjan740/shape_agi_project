@@ -33,6 +33,20 @@ def load_config(config_path):
         return yaml.safe_load(f)
 
 
+def make_goal_vec(target_shape, target_color, target_size, shape_to_i, color_to_i, size_to_i, goal_dim, device):
+    g = torch.zeros(1, goal_dim, device=device)
+
+    si = shape_to_i[target_shape]
+    ci = color_to_i[target_color]
+    zi = size_to_i[target_size]
+
+    # layout: [shapes | colors | sizes]
+    g[0, si] = 1.0
+    g[0, len(shape_to_i) + ci] = 1.0
+    g[0, len(shape_to_i) + len(color_to_i) + zi] = 1.0
+    return g
+
+
 def main():
     print("[train.py] ENTER main()", flush=True)
     print("Python:", sys.executable, flush=True)
@@ -75,16 +89,29 @@ def main():
           {"time_scaling": env.time_scaling, "noisy": env.noisy}, flush=True)
 
     # -------------------------
+    # Goal dims (from env lists)
+    # -------------------------
+    possible_shapes = env.shapes_list
+    possible_colors = env.colors_list
+    possible_sizes = env.sizes_list
+
+    shape_to_i = {s: i for i, s in enumerate(possible_shapes)}
+    color_to_i = {c: i for i, c in enumerate(possible_colors)}
+    size_to_i  = {z: i for i, z in enumerate(possible_sizes)}
+
+    goal_dim = len(possible_shapes) + len(possible_colors) + len(possible_sizes)
+
+    # -------------------------
     # Initialize POLICY
     # -------------------------
     from policies.policy import Policy
 
     policy_cfg = config.get("policy", {})
-    policy = Policy(delay_ms=int(policy_cfg.get("delay_ms", 0)))
+    policy = Policy(delay_ms=int(policy_cfg.get("delay_ms", 0)), goal_dim=goal_dim)
     policy = policy.to(device)
 
     print("Policy initialized:",
-          {"delay_ms": policy.delay_ms}, flush=True)
+          {"delay_ms": policy.delay_ms, "goal_dim": policy.goal_dim}, flush=True)
 
     # -------------------------
     # Episodic Training Loop
@@ -102,25 +129,28 @@ def main():
     total_reward = 0.0
     reward_history = []
 
-    possible_shapes = env.shapes_list
-    possible_colors = env.colors_list
-    possible_sizes = env.sizes_list
-
     for episode in range(num_episodes):
 
         obs = env.reset().to(device)
 
-        # FULL LATENT TARGET
+        # sample FULL target
         target_shape = random.choice(possible_shapes)
         target_color = random.choice(possible_colors)
         target_size  = random.choice(possible_sizes)
+
+        goal_vec = make_goal_vec(
+            target_shape, target_color, target_size,
+            shape_to_i, color_to_i, size_to_i,
+            goal_dim, device
+        )
 
         episode_reward = 0.0
 
         for step in range(steps_per_episode):
 
             features = policy.encoder(obs)
-            logits = policy.head(features)
+            x = torch.cat([features, goal_vec], dim=1)
+            logits = policy.head(x)
 
             probs = torch.softmax(logits, dim=1)
             dist = torch.distributions.Categorical(probs)
@@ -136,24 +166,22 @@ def main():
 
             state = env._get_state()
 
-            # FULL LATENT REWARD (Minimal Reward Shaping)
-            reward = 0.0
-
+            # IMPORTANT: keep YOUR reward logic here (the latest one you are using)
+            # Example (full match has bigger weight + partial shaping):
             if (
                 state["shape"] == target_shape and
                 state["color"] == target_color and
                 state["size"]  == target_size
-                ):
-                    reward = 2.0   # strong full-match signal
+            ):
+                reward = 2.0
             else:
+                reward = 0.0
                 if state["shape"] == target_shape:
                     reward += 0.3
                 if state["color"] == target_color:
                     reward += 0.3
                 if state["size"] == target_size:
                     reward += 0.4
-
-            
 
             episode_reward += reward
             total_reward += reward

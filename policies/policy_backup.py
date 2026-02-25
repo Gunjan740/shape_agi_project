@@ -12,11 +12,10 @@ class Policy(nn.Module):
     Used for both training and evaluation.
     """
 
-    def __init__(self, delay_ms: int = 0, goal_dim: int = 0):
+    def __init__(self, delay_ms: int = 0):
         super().__init__()
 
         self.delay_ms = delay_ms
-        self.goal_dim = int(goal_dim)
 
         # Build perception model
         self.encoder = CNNEncoder()
@@ -26,13 +25,12 @@ class Policy(nn.Module):
         dummy_features = self.encoder(dummy_input)
         feature_dim = dummy_features.shape[1]
 
-        # Head now expects (feature_dim + goal_dim)
-        self.head = PolicyHead(input_dim=feature_dim + self.goal_dim)
+        self.head = PolicyHead(input_dim=feature_dim)
 
-    def act(self, obs: torch.Tensor, goal: torch.Tensor = None) -> torch.Tensor:
+    def act(self, obs: torch.Tensor) -> torch.Tensor:
         """
         Forward pass:
-        obs → CNN → concat goal → head → argmax → one-hot action
+        obs → CNN → head → argmax → one-hot action
         """
 
         # Artificial delay (System 2 slower)
@@ -43,17 +41,7 @@ class Policy(nn.Module):
 
         with torch.no_grad():
             features = self.encoder(obs)
-
-            if self.goal_dim > 0:
-                if goal is None:
-                    raise ValueError("goal must be provided when goal_dim > 0")
-                if goal.dim() != 2 or goal.size(0) != features.size(0) or goal.size(1) != self.goal_dim:
-                    raise ValueError(f"goal must have shape (B, {self.goal_dim}), got {tuple(goal.shape)}")
-                x = torch.cat([features, goal.to(device)], dim=1)
-            else:
-                x = features
-
-            logits = self.head(x)
+            logits = self.head(features)
 
             action_index = torch.argmax(logits, dim=1)
 

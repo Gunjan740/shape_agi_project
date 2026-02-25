@@ -44,24 +44,17 @@ def main():
     print("Seed:", args.seed, flush=True)
     print("Output directory:", args.output_dir, flush=True)
 
-    # -------------------------
-    # Device setup (CUDA support)
-    # -------------------------
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device, flush=True)
 
-    # Create output directory
     output_path = Path(args.output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # Copy config
     shutil.copy(args.config, output_path / "config.yaml")
 
-    # Set seed
     set_seed(args.seed)
     print("Seed set.", flush=True)
 
-    # Load config
     config = load_config(args.config)
     print("Loaded config:", config, flush=True)
 
@@ -94,51 +87,87 @@ def main():
           {"delay_ms": policy.delay_ms}, flush=True)
 
     # -------------------------
-    # Minimal Training Loop
+    # Episodic Training Loop
     # -------------------------
-    print("\nStarting minimal training loop...", flush=True)
+    print("\nStarting episodic training loop...", flush=True)
 
     learning_rate = config["training"]["learning_rate"]
     num_steps = config["training"]["num_steps"]
 
     optimizer = torch.optim.Adam(policy.parameters(), lr=learning_rate)
 
+    steps_per_episode = 10
+    num_episodes = num_steps // steps_per_episode
+
     total_reward = 0.0
-    reward_history = []  # ✅ ADDED
+    reward_history = []
 
-    obs = env.reset().to(device)
+    possible_shapes = env.shapes_list
+    possible_colors = env.colors_list
+    possible_sizes = env.sizes_list
 
-    for step in range(num_steps):
-        features = policy.encoder(obs)
-        logits = policy.head(features)
+    for episode in range(num_episodes):
 
-        probs = torch.softmax(logits, dim=1)
-        dist = torch.distributions.Categorical(probs)
+        obs = env.reset().to(device)
 
-        action_index = dist.sample()
-        log_prob = dist.log_prob(action_index)
+        # FULL LATENT TARGET
+        target_shape = random.choice(possible_shapes)
+        target_color = random.choice(possible_colors)
+        target_size  = random.choice(possible_sizes)
 
-        action = torch.zeros(5, device=device)
-        action[action_index.item()] = 1.0
+        episode_reward = 0.0
 
-        next_obs = env._step_simulation(action)
-        next_obs = next_obs.unsqueeze(0).to(device)
+        for step in range(steps_per_episode):
 
-        state = env._get_state()
-        reward = 1.0 if state["shape"] == "triangle" else 0.0
-        total_reward += reward
-        reward_history.append(total_reward)  # ✅ ADDED
+            features = policy.encoder(obs)
+            logits = policy.head(features)
 
-        loss = -log_prob * reward
+            probs = torch.softmax(logits, dim=1)
+            dist = torch.distributions.Categorical(probs)
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+            action_index = dist.sample()
+            log_prob = dist.log_prob(action_index)
 
-        obs = next_obs
+            action = torch.zeros(5, device=device)
+            action[action_index.item()] = 1.0
 
-        if (step + 1) % 100 == 0 or step == 0:
-            print(f"Step {step+1}/{num_steps} | total_reward={total_reward}", flush=True)
+            next_obs = env._step_simulation(action)
+            next_obs = next_obs.unsqueeze(0).to(device)
+
+            state = env._get_state()
+
+            # FULL LATENT REWARD (Minimal Reward Shaping)
+            reward = 0.0
+
+            if (
+                state["shape"] == target_shape and
+                state["color"] == target_color and
+                state["size"]  == target_size
+                ):
+                    reward = 2.0   # strong full-match signal
+            else:
+                if state["shape"] == target_shape:
+                    reward += 0.3
+                if state["color"] == target_color:
+                    reward += 0.3
+                if state["size"] == target_size:
+                    reward += 0.4
+
+            
+
+            episode_reward += reward
+            total_reward += reward
+            reward_history.append(total_reward)
+
+            loss = -log_prob * reward
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            obs = next_obs
+
+        print(f"Episode {episode+1} | episode_reward={episode_reward} | total_reward={total_reward}")
 
     print("Training finished.", flush=True)
     print("Total reward:", total_reward, flush=True)
@@ -146,11 +175,8 @@ def main():
     # -------------------------
     # Save Model & Metrics
     # -------------------------
-
-    # Save model
     torch.save(policy.state_dict(), output_path / "model.pt")
 
-    # Save metrics
     metrics = {
         "total_reward": total_reward,
         "num_steps": num_steps,
@@ -160,7 +186,6 @@ def main():
     with open(output_path / "metrics.json", "w") as f:
         json.dump(metrics, f, indent=2)
 
-    # Save reward curve
     np.save(output_path / "reward_curve.npy", np.array(reward_history))
 
     print("Model and metrics saved.", flush=True)
