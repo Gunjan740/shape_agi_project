@@ -7,4 +7,9 @@ policy:
 
 training:
   learning_rate: 0.001
-  num_steps: 10000
+  num_steps: 50000
+  entropy_coef: 0.01
+  gamma: 0.99
+  steps_per_episode: 20
+  curriculum_window: 200    # episodes to measure hit rate over
+  curriculum_threshold: 0.3 # hit rate needed to advance phase

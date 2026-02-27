@@ -1,4 +1,5 @@
 import argparse
+import collections
 import shutil
 import json
 import random
@@ -35,15 +36,57 @@ def load_config(config_path):
 
 def make_goal_vec(target_shape, target_color, target_size, shape_to_i, color_to_i, size_to_i, goal_dim, device):
     g = torch.zeros(1, goal_dim, device=device)
-
     si = shape_to_i[target_shape]
     ci = color_to_i[target_color]
     zi = size_to_i[target_size]
-
     g[0, si] = 1.0
     g[0, len(shape_to_i) + ci] = 1.0
     g[0, len(shape_to_i) + len(color_to_i) + zi] = 1.0
     return g
+
+
+def compute_reward(state, target_shape, target_color, target_size, phase):
+    """
+    Compute per-step reward and phase-hit flag based on curriculum phase.
+
+    Phase 1: shape only
+    Phase 2: shape + color
+    Phase 3: shape + color + size (full task)
+
+    phase_hit  — used to advance curriculum
+    episode_hit — full-tuple match, used for the episodic bonus (evaluation metric)
+    """
+    shape_match = state["shape"] == target_shape
+    color_match = state["color"] == target_color
+    size_match  = state["size"]  == target_size
+
+    full_match  = shape_match and color_match and size_match
+    phase_hit   = False
+
+    if phase == 1:
+        reward    = 1.0 if shape_match else 0.0
+        phase_hit = shape_match
+
+    elif phase == 2:
+        if shape_match and color_match:
+            reward    = 2.0
+            phase_hit = True
+        elif shape_match:
+            reward = 0.5
+        else:
+            reward = 0.0
+
+    else:  # phase 3 — full task with partial credit
+        if full_match:
+            reward    = 3.0
+            phase_hit = True
+        else:
+            reward = 0.0
+            if shape_match: reward += 0.2
+            if color_match: reward += 0.2
+            if size_match:  reward += 0.3
+
+    return reward, phase_hit, full_match
 
 
 def main():
@@ -74,7 +117,7 @@ def main():
 
     possible_shapes = env.shapes_list
     possible_colors = env.colors_list
-    possible_sizes = env.sizes_list
+    possible_sizes  = env.sizes_list
 
     shape_to_i = {s: i for i, s in enumerate(possible_shapes)}
     color_to_i = {c: i for i, c in enumerate(possible_colors)}
@@ -87,22 +130,30 @@ def main():
     policy = Policy(delay_ms=int(policy_cfg.get("delay_ms", 0)), goal_dim=goal_dim)
     policy = policy.to(device)
 
-    learning_rate = config["training"]["learning_rate"]
-    num_steps = config["training"]["num_steps"]
+    train_cfg          = config["training"]
+    learning_rate      = train_cfg["learning_rate"]
+    num_steps          = train_cfg["num_steps"]
+    entropy_coef       = float(train_cfg.get("entropy_coef", 0.01))
+    gamma              = float(train_cfg.get("gamma", 0.99))
+    curriculum_window  = int(train_cfg.get("curriculum_window", 200))
+    curriculum_thresh  = float(train_cfg.get("curriculum_threshold", 0.3))
+    steps_per_episode  = int(train_cfg.get("steps_per_episode", 20))
 
     optimizer = torch.optim.Adam(policy.parameters(), lr=learning_rate)
+    num_episodes      = num_steps // steps_per_episode
 
-    steps_per_episode = 10
-    num_episodes = num_steps // steps_per_episode
-
-    total_reward = 0.0
+    total_reward  = 0.0
     reward_history = []
 
-    # ✅ Step 1: Moving baseline
-    baseline = 0.0
-    beta = 0.9
+    # Episode-level running baseline; reset on phase advance
+    baseline      = 0.0
+    baseline_beta = 0.9
 
-    print("\nStarting episodic training loop...", flush=True)
+    # Curriculum state
+    curriculum_phase = 1
+    phase_window     = collections.deque(maxlen=curriculum_window)
+
+    print(f"\nStarting episodic training loop (curriculum phase {curriculum_phase})...", flush=True)
 
     for episode in range(num_episodes):
 
@@ -118,20 +169,26 @@ def main():
             goal_dim, device
         )
 
-        episode_reward = 0.0
-        episode_hit = False  # ✅ Step 3: track strict success
+        # Trajectory buffers
+        ep_log_probs  = []
+        ep_entropies  = []
+        ep_rewards    = []
+        episode_hit   = False   # full-tuple — for episodic bonus
+        ep_phase_hit  = False   # phase-specific — for curriculum advancement
 
-        for step in range(steps_per_episode):
+        # ── Collect full episode trajectory ───────────────────────────────────
+        for _ in range(steps_per_episode):
 
             features = policy.encoder(obs)
             x = torch.cat([features, goal_vec], dim=1)
             logits = policy.head(x)
 
             probs = torch.softmax(logits, dim=1)
-            dist = torch.distributions.Categorical(probs)
+            dist  = torch.distributions.Categorical(probs)
 
             action_index = dist.sample()
-            log_prob = dist.log_prob(action_index)
+            ep_log_probs.append(dist.log_prob(action_index))
+            ep_entropies.append(dist.entropy())
 
             action = torch.zeros(5, device=device)
             action[action_index.item()] = 1.0
@@ -141,46 +198,77 @@ def main():
 
             state = env._get_state()
 
-            # ✅ Step 2: Stronger strict reward
-            if (
-                state["shape"] == target_shape and
-                state["color"] == target_color and
-                state["size"]  == target_size
-            ):
-                reward = 3.0
+            reward, phase_hit, full_match = compute_reward(
+                state, target_shape, target_color, target_size, curriculum_phase
+            )
+
+            if phase_hit:
+                ep_phase_hit = True
+            if full_match:
                 episode_hit = True
-            else:
-                reward = 0.0
-                if state["shape"] == target_shape:
-                    reward += 0.2
-                if state["color"] == target_color:
-                    reward += 0.2
-                if state["size"] == target_size:
-                    reward += 0.3
 
-            episode_reward += reward
-            total_reward += reward
-            reward_history.append(total_reward)
-
-            # ✅ Step 1: Advantage with baseline
-            advantage = reward - baseline
-            baseline = beta * baseline + (1 - beta) * reward
-
-            loss = -log_prob * advantage
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
+            ep_rewards.append(reward)
             obs = next_obs
 
-        # ✅ Step 3: Episodic strict bonus
+        # ── Episodic strict bonus: only for full-tuple hit (aligns with eval) ─
         if episode_hit:
-            bonus = 5.0
-            total_reward += bonus
-            reward_history.append(total_reward)
+            ep_rewards[-1] += 5.0
 
-        print(f"Episode {episode+1} | episode_reward={episode_reward} | total_reward={total_reward}")
+        # ── Compute discounted returns backwards ───────────────────────────────
+        returns = []
+        G = 0.0
+        for r in reversed(ep_rewards):
+            G = r + gamma * G
+            returns.insert(0, G)
+        returns = torch.tensor(returns, dtype=torch.float32, device=device)
+
+        # ── Episode-level baseline update ──────────────────────────────────────
+        episode_return = returns[0].item()
+        baseline = baseline_beta * baseline + (1 - baseline_beta) * episode_return
+
+        # ── Advantage ─────────────────────────────────────────────────────────
+        advantages = returns - baseline
+
+        # ── Single weight update ───────────────────────────────────────────────
+        log_probs_t = torch.stack(ep_log_probs)
+        entropies_t = torch.stack(ep_entropies)
+
+        policy_loss  = -(log_probs_t * advantages).sum()
+        entropy_loss = -entropy_coef * entropies_t.sum()
+        loss = policy_loss + entropy_loss
+
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
+        optimizer.step()
+
+        # ── Curriculum advancement ─────────────────────────────────────────────
+        phase_window.append(float(ep_phase_hit))
+        if curriculum_phase < 3 and len(phase_window) == curriculum_window:
+            hit_rate = sum(phase_window) / len(phase_window)
+            if hit_rate >= curriculum_thresh:
+                curriculum_phase += 1
+                phase_window.clear()
+                baseline = 0.0  # reset baseline — reward scale changes
+                print(
+                    f"\n>>> Curriculum advanced to phase {curriculum_phase} "
+                    f"at episode {episode+1} (hit_rate={hit_rate:.2f})\n",
+                    flush=True
+                )
+
+        # ── Logging ───────────────────────────────────────────────────────────
+        episode_reward = sum(ep_rewards)
+        total_reward  += episode_reward
+        reward_history.append(total_reward)
+
+        if (episode + 1) % 50 == 0 or episode == 0:
+            print(
+                f"Episode {episode+1:4d} | phase={curriculum_phase} | "
+                f"ep_return={episode_return:6.2f} | baseline={baseline:6.2f} | "
+                f"phase_hit={ep_phase_hit} | full_hit={episode_hit} | "
+                f"total={total_reward:.1f}",
+                flush=True
+            )
 
     print("Training finished.")
     print("Total reward:", total_reward)
@@ -190,7 +278,8 @@ def main():
     metrics = {
         "total_reward": total_reward,
         "num_steps": num_steps,
-        "seed": args.seed
+        "seed": args.seed,
+        "final_curriculum_phase": curriculum_phase
     }
 
     with open(output_path / "metrics.json", "w") as f:
