@@ -19,9 +19,10 @@ def parse_args():
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--delay_ms", type=int, default=0)
-    parser.add_argument("--episodes", type=int, default=50)
-    parser.add_argument("--steps_per_episode", type=int, default=10)
+    parser.add_argument("--episodes", type=int, default=100)
+    parser.add_argument("--steps_per_episode", type=int, default=20)
     parser.add_argument("--seed", type=int, default=123)
+    parser.add_argument("--noisy", action="store_true", default=False)
     parser.add_argument("--output_dir", type=str, required=True)
 
     return parser.parse_args()
@@ -40,16 +41,29 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-def _to_policy_input(state, device):
+def _to_policy_input(state, device, avg_frames=False):
+    """
+    Prepare observation for policy input.
+
+    System 1 (avg_frames=False): use only the last frame.
+    System 2 (avg_frames=True):  average all frames in the stack — temporal
+                                  smoothing from real-time delay accumulation.
+    """
     state = state.to(device)
 
     if state.dim() == 3:
         state = state.unsqueeze(0)
     elif state.dim() == 4:
         if state.size(0) != 1:
-            state = state[-1].unsqueeze(0)
+            if avg_frames:
+                state = state.mean(dim=0, keepdim=True)   # (N,C,H,W) → (1,C,H,W)
+            else:
+                state = state[-1].unsqueeze(0)             # last frame only
     elif state.dim() == 5:
-        state = state[:, -1, ...]
+        if avg_frames:
+            state = state.mean(dim=1)                      # (B,N,C,H,W) → (B,C,H,W)
+        else:
+            state = state[:, -1, ...]
     else:
         raise ValueError(f"Unexpected state shape: {state.shape}")
 
@@ -86,21 +100,25 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device, flush=True)
     print("Evaluation seed:", args.seed, flush=True)
+    print("Noisy:", args.noisy, flush=True)
 
     config = load_config(args.config)
-
     env_cfg = config.get("env", {})
+
+    # noisy: CLI flag overrides config; use return_states=True to check
+    # all intermediate sim states within each env.step() for success
+    noisy = args.noisy or bool(env_cfg.get("noisy", False))
 
     env = ShapeEnv(
         time_scaling=float(env_cfg.get("time_scaling", 1.0)),
-        noisy=bool(env_cfg.get("noisy", False)),
+        noisy=noisy,
         random_initial=True,
         device=str(device),
+        return_states=True,
     )
 
     print("Environment ready.", flush=True)
 
-    # ---- goal dims from env lists ----
     possible_shapes = env.shapes_list
     possible_colors = env.colors_list
     possible_sizes = env.sizes_list
@@ -117,7 +135,6 @@ def main():
     policy.eval()
 
     print("Model loaded.", flush=True)
-
     print("MODEL_PATH:", args.model_path, flush=True)
     first_param = next(policy.parameters()).detach().float().mean().item()
     print("MODEL_PARAM_MEAN:", first_param, flush=True)
@@ -128,7 +145,7 @@ def main():
 
     print("\nStarting evaluation...\n", flush=True)
 
-    # ---- Pre-generate targets so System1 vs System2 are comparable ----
+    # Pre-generate targets so System 1 vs System 2 are comparable
     targets = []
     for _ in range(args.episodes):
         t_shape = np.random.choice(possible_shapes)
@@ -136,11 +153,11 @@ def main():
         t_size = np.random.choice(possible_sizes)
         targets.append((t_shape, t_color, t_size))
 
-    # ---- Real-time benchmark ----
+    # Real-time benchmark
     dummy_goal = torch.zeros(1, goal_dim, device=device)
 
     def benchmark_policy_fn(state):
-        state = _to_policy_input(state, device)
+        state = _to_policy_input(state, device, avg_frames=False)  # benchmark always uses last frame
         with torch.no_grad():
             return policy.act(state, dummy_goal)
 
@@ -164,7 +181,6 @@ def main():
             device,
         )
 
-        # ---- One-time debug checks (goal correctness + goal sensitivity) ----
         if ep == 0:
             print(
                 "DEBUG goal_sum:",
@@ -177,36 +193,26 @@ def main():
         episode_success = False
         did_goal_sensitivity_check = False
 
-        for step in range(args.steps_per_episode):
+        for _ in range(args.steps_per_episode):
 
             def policy_fn(state):
                 nonlocal did_goal_sensitivity_check
 
-                state = _to_policy_input(state, device)
+                state = _to_policy_input(state, device, avg_frames=(args.delay_ms > 0))
 
-                # One-time goal sensitivity test on first episode/first step
+                # One-time goal sensitivity test
                 if ep == 0 and (not did_goal_sensitivity_check):
                     with torch.no_grad():
                         feat = policy.encoder(state)
-
                         alt_shape = possible_shapes[(shape_to_i[target_shape] + 1) % len(possible_shapes)]
                         g2 = make_goal_vec(
-                            alt_shape,
-                            target_color,
-                            target_size,
-                            shape_to_i,
-                            color_to_i,
-                            size_to_i,
-                            goal_dim,
-                            device,
+                            alt_shape, target_color, target_size,
+                            shape_to_i, color_to_i, size_to_i, goal_dim, device,
                         )
-
                         logits1 = policy.head(torch.cat([feat, goal_vec], dim=1))
                         logits2 = policy.head(torch.cat([feat, g2], dim=1))
                         diff = (logits1 - logits2).abs().mean().item()
-
                         print("GOAL_SENSITIVITY_MEAN_ABS_LOGIT_DIFF:", diff, flush=True)
-
                     did_goal_sensitivity_check = True
 
                 start_time = time.time()
@@ -216,23 +222,23 @@ def main():
 
                 return action
 
-            step_out = env.step(policy_fn)
-
-            if isinstance(step_out, tuple):
-                obs, info = step_out
-            else:
-                obs, info = step_out, None
-
+            # env.step returns (observations, states, info) with return_states=True
+            obs, states, _ = env.step(policy_fn)
             obs = obs.to(device)
 
-            state = env._get_state()
+            # Check ALL intermediate sim states — catches success even if later
+            # sim steps move away from goal (important for System 2 with many steps)
+            for state in states:
+                if (
+                    state["shape"] == target_shape
+                    and state["color"] == target_color
+                    and state["size"] == target_size
+                ):
+                    episode_success = True
+                    break
 
-            if (
-                state["shape"] == target_shape
-                and state["color"] == target_color
-                and state["size"] == target_size
-            ):
-                episode_success = True
+            if episode_success:
+                break  # no need to continue the episode
 
         if episode_success:
             success_count += 1
@@ -255,6 +261,7 @@ def main():
         "delay_ms": args.delay_ms,
         "episodes": args.episodes,
         "steps_per_episode": args.steps_per_episode,
+        "noisy": noisy,
         "seed": args.seed,
         "goal_dim": goal_dim,
     }

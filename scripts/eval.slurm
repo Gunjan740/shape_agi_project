@@ -30,14 +30,21 @@ echo "Running evaluation..."
 DELAY_MS=$1
 MODEL_PATH=$2
 SEED=$3
+NOISY=${4:-""}   # pass "noisy" as 4th arg to enable, e.g. sbatch eval.slurm 0 model.pt 0 noisy
+
+NOISY_FLAG=""
+if [ "$NOISY" = "noisy" ]; then
+  NOISY_FLAG="--noisy"
+fi
 
 python -m evaluation.evaluate \
   --config configs/base.yaml \
   --model_path ${MODEL_PATH} \
   --delay_ms ${DELAY_MS} \
   --episodes 200 \
-  --steps_per_episode 30 \
+  --steps_per_episode 20 \
   --seed ${SEED} \
-  --output_dir results/eval_delay_${DELAY_MS}_seed_${SEED}_${SLURM_JOB_ID}
+  ${NOISY_FLAG} \
+  --output_dir results/eval_delay${DELAY_MS}_seed${SEED}_${SLURM_JOB_ID}
 
 echo "Evaluation finished."
