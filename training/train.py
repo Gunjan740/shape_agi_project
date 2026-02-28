@@ -5,6 +5,7 @@ import json
 import random
 import numpy as np
 import torch
+import torch.nn.functional as F
 import yaml
 from pathlib import Path
 import os
@@ -52,9 +53,6 @@ def compute_reward(state, target_shape, target_color, target_size, phase):
     Phase 1: shape only
     Phase 2: shape + color
     Phase 3: shape + color + size (full task)
-
-    phase_hit  — used to advance curriculum
-    episode_hit — full-tuple match, used for the episodic bonus (evaluation metric)
     """
     shape_match = state["shape"] == target_shape
     color_match = state["color"] == target_color
@@ -76,7 +74,7 @@ def compute_reward(state, target_shape, target_color, target_size, phase):
         else:
             reward = 0.0
 
-    else:  # phase 3 — full task with partial credit
+    else:  # phase 3
         if full_match:
             reward    = 3.0
             phase_hit = True
@@ -87,6 +85,20 @@ def compute_reward(state, target_shape, target_color, target_size, phase):
             if size_match:  reward += 0.3
 
     return reward, phase_hit, full_match
+
+
+def compute_gae(rewards, values, last_value, gamma, gae_lambda):
+    """Compute GAE advantages and TD(lambda) returns for one episode."""
+    T = len(rewards)
+    advantages = [0.0] * T
+    gae = 0.0
+    for t in reversed(range(T)):
+        next_val = last_value if t == T - 1 else values[t + 1]
+        delta = rewards[t] + gamma * next_val - values[t]
+        gae = delta + gamma * gae_lambda * gae
+        advantages[t] = gae
+    returns = [adv + val for adv, val in zip(advantages, values)]
+    return advantages, returns
 
 
 def main():
@@ -130,143 +142,185 @@ def main():
     policy = Policy(delay_ms=int(policy_cfg.get("delay_ms", 0)), goal_dim=goal_dim)
     policy = policy.to(device)
 
-    train_cfg          = config["training"]
-    learning_rate      = train_cfg["learning_rate"]
-    num_steps          = train_cfg["num_steps"]
-    entropy_coef       = float(train_cfg.get("entropy_coef", 0.01))
-    gamma              = float(train_cfg.get("gamma", 0.99))
-    curriculum_window  = int(train_cfg.get("curriculum_window", 200))
-    curriculum_thresh  = float(train_cfg.get("curriculum_threshold", 0.3))
-    steps_per_episode  = int(train_cfg.get("steps_per_episode", 20))
+    train_cfg         = config["training"]
+    learning_rate     = train_cfg["learning_rate"]
+    num_steps         = train_cfg["num_steps"]
+    entropy_coef      = float(train_cfg.get("entropy_coef", 0.01))
+    gamma             = float(train_cfg.get("gamma", 0.99))
+    curriculum_window = int(train_cfg.get("curriculum_window", 200))
+    curriculum_thresh = float(train_cfg.get("curriculum_threshold", 0.3))
+    steps_per_episode = int(train_cfg.get("steps_per_episode", 20))
+
+    # PPO hyperparameters
+    ppo_epochs      = int(train_cfg.get("ppo_epochs", 4))
+    ppo_clip        = float(train_cfg.get("ppo_clip", 0.2))
+    gae_lambda      = float(train_cfg.get("gae_lambda", 0.95))
+    batch_episodes  = int(train_cfg.get("batch_episodes", 20))
+    value_loss_coef = float(train_cfg.get("value_loss_coef", 0.5))
 
     optimizer = torch.optim.Adam(policy.parameters(), lr=learning_rate)
-    num_episodes      = num_steps // steps_per_episode
 
-    total_reward  = 0.0
+    num_episodes   = num_steps // steps_per_episode
+    num_batches    = num_episodes // batch_episodes
+
+    total_reward   = 0.0
     reward_history = []
-
-    # Episode-level running baseline; reset on phase advance
-    baseline      = 0.0
-    baseline_beta = 0.9
+    global_episode = 0
 
     # Curriculum state
     curriculum_phase = 1
     phase_window     = collections.deque(maxlen=curriculum_window)
 
-    print(f"\nStarting episodic training loop (curriculum phase {curriculum_phase})...", flush=True)
+    print(f"\nStarting PPO training (curriculum phase {curriculum_phase})...", flush=True)
+    print(f"  Episodes: {num_episodes} | Batches: {num_batches} | batch_episodes: {batch_episodes}", flush=True)
 
-    for episode in range(num_episodes):
+    for batch_idx in range(num_batches):
 
-        obs = env.reset().to(device)
+        # ── Collect batch_episodes rollouts (no_grad) ─────────────────────────
+        all_obs        = []
+        all_actions    = []
+        all_log_probs  = []
+        all_advantages = []
+        all_returns    = []
+        all_goals      = []
 
-        target_shape = random.choice(possible_shapes)
-        target_color = random.choice(possible_colors)
-        target_size  = random.choice(possible_sizes)
+        batch_full_hits  = 0
+        batch_phase_hits = 0
+        batch_return_sum = 0.0
 
-        goal_vec = make_goal_vec(
-            target_shape, target_color, target_size,
-            shape_to_i, color_to_i, size_to_i,
-            goal_dim, device
-        )
+        for ep_in_batch in range(batch_episodes):
+            global_episode += 1
 
-        # Trajectory buffers
-        ep_log_probs  = []
-        ep_entropies  = []
-        ep_rewards    = []
-        episode_hit   = False   # full-tuple — for episodic bonus
-        ep_phase_hit  = False   # phase-specific — for curriculum advancement
+            obs = env.reset().to(device)
 
-        # ── Collect full episode trajectory ───────────────────────────────────
-        for _ in range(steps_per_episode):
+            target_shape = random.choice(possible_shapes)
+            target_color = random.choice(possible_colors)
+            target_size  = random.choice(possible_sizes)
 
-            features = policy.encoder(obs)
-            x = torch.cat([features, goal_vec], dim=1)
-            logits = policy.head(x)
-
-            probs = torch.softmax(logits, dim=1)
-            dist  = torch.distributions.Categorical(probs)
-
-            action_index = dist.sample()
-            ep_log_probs.append(dist.log_prob(action_index))
-            ep_entropies.append(dist.entropy())
-
-            action = torch.zeros(5, device=device)
-            action[action_index.item()] = 1.0
-
-            next_obs = env._step_simulation(action)
-            next_obs = next_obs.unsqueeze(0).to(device)
-
-            state = env._get_state()
-
-            reward, phase_hit, full_match = compute_reward(
-                state, target_shape, target_color, target_size, curriculum_phase
+            goal_vec = make_goal_vec(
+                target_shape, target_color, target_size,
+                shape_to_i, color_to_i, size_to_i,
+                goal_dim, device
             )
 
-            if phase_hit:
-                ep_phase_hit = True
-            if full_match:
-                episode_hit = True
+            ep_obs       = []
+            ep_actions   = []
+            ep_log_probs = []
+            ep_rewards   = []
+            ep_values    = []
+            episode_hit  = False
+            ep_phase_hit = False
 
-            ep_rewards.append(reward)
-            obs = next_obs
+            with torch.no_grad():
+                for _ in range(steps_per_episode):
+                    logits, value = policy(obs, goal_vec)
+                    probs = torch.softmax(logits, dim=1)
+                    dist  = torch.distributions.Categorical(probs)
+                    action_idx = dist.sample()
 
-        # ── Episodic strict bonus: only for full-tuple hit (aligns with eval) ─
-        if episode_hit:
-            ep_rewards[-1] += 5.0
+                    ep_obs.append(obs)
+                    ep_actions.append(action_idx)
+                    ep_log_probs.append(dist.log_prob(action_idx).item())
+                    ep_values.append(value.item())
 
-        # ── Compute discounted returns backwards ───────────────────────────────
-        returns = []
-        G = 0.0
-        for r in reversed(ep_rewards):
-            G = r + gamma * G
-            returns.insert(0, G)
-        returns = torch.tensor(returns, dtype=torch.float32, device=device)
+                    action = torch.zeros(5, device=device)
+                    action[action_idx.item()] = 1.0
 
-        # ── Episode-level baseline update ──────────────────────────────────────
-        episode_return = returns[0].item()
-        baseline = baseline_beta * baseline + (1 - baseline_beta) * episode_return
+                    next_obs = env._step_simulation(action)
+                    next_obs = next_obs.unsqueeze(0).to(device)
 
-        # ── Advantage ─────────────────────────────────────────────────────────
-        advantages = returns - baseline
+                    state = env._get_state()
+                    reward, phase_hit, full_match = compute_reward(
+                        state, target_shape, target_color, target_size, curriculum_phase
+                    )
 
-        # ── Single weight update ───────────────────────────────────────────────
-        log_probs_t = torch.stack(ep_log_probs)
-        entropies_t = torch.stack(ep_entropies)
+                    if phase_hit:  ep_phase_hit = True
+                    if full_match: episode_hit  = True
 
-        policy_loss  = -(log_probs_t * advantages).sum()
-        entropy_loss = -entropy_coef * entropies_t.sum()
-        loss = policy_loss + entropy_loss
+                    ep_rewards.append(reward)
+                    obs = next_obs
 
-        optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
-        optimizer.step()
+                # Episodic bonus for full-tuple hit (aligns with eval metric)
+                if episode_hit:
+                    ep_rewards[-1] += 5.0
 
-        # ── Curriculum advancement ─────────────────────────────────────────────
-        phase_window.append(float(ep_phase_hit))
-        if curriculum_phase < 3 and len(phase_window) == curriculum_window:
-            hit_rate = sum(phase_window) / len(phase_window)
-            if hit_rate >= curriculum_thresh:
-                curriculum_phase += 1
-                phase_window.clear()
-                baseline = 0.0  # reset baseline — reward scale changes
-                print(
-                    f"\n>>> Curriculum advanced to phase {curriculum_phase} "
-                    f"at episode {episode+1} (hit_rate={hit_rate:.2f})\n",
-                    flush=True
-                )
+                # Bootstrap value at end of episode
+                _, last_val = policy(obs, goal_vec)
+                last_val = last_val.item()
+
+            # GAE
+            advantages, returns = compute_gae(ep_rewards, ep_values, last_val, gamma, gae_lambda)
+
+            all_obs.extend(ep_obs)
+            all_actions.extend(ep_actions)
+            all_log_probs.extend(ep_log_probs)
+            all_advantages.extend(advantages)
+            all_returns.extend(returns)
+            all_goals.extend([goal_vec] * steps_per_episode)
+
+            if episode_hit:  batch_full_hits  += 1
+            if ep_phase_hit: batch_phase_hits += 1
+            batch_return_sum += sum(ep_rewards)
+
+            # Curriculum advancement
+            phase_window.append(float(ep_phase_hit))
+            if curriculum_phase < 3 and len(phase_window) == curriculum_window:
+                hit_rate = sum(phase_window) / len(phase_window)
+                if hit_rate >= curriculum_thresh:
+                    curriculum_phase += 1
+                    phase_window.clear()
+                    print(
+                        f"\n>>> Curriculum advanced to phase {curriculum_phase} "
+                        f"at episode {global_episode} (hit_rate={hit_rate:.2f})\n",
+                        flush=True
+                    )
+
+        # ── Build tensors ──────────────────────────────────────────────────────
+        obs_t        = torch.cat(all_obs, dim=0)                                         # (N, C, H, W)
+        actions_t    = torch.stack(all_actions)                                          # (N,)
+        old_lp_t     = torch.tensor(all_log_probs,  dtype=torch.float32, device=device) # (N,)
+        goals_t      = torch.cat(all_goals, dim=0)                                       # (N, goal_dim)
+        returns_t    = torch.tensor(all_returns,    dtype=torch.float32, device=device) # (N,)
+        advantages_t = torch.tensor(all_advantages, dtype=torch.float32, device=device) # (N,)
+
+        # Normalize advantages across the full batch
+        advantages_t = (advantages_t - advantages_t.mean()) / (advantages_t.std() + 1e-8)
+
+        # ── PPO update epochs ──────────────────────────────────────────────────
+        for _ in range(ppo_epochs):
+            logits, values = policy(obs_t, goals_t)
+            probs = torch.softmax(logits, dim=1)
+            dist  = torch.distributions.Categorical(probs)
+            new_log_probs = dist.log_prob(actions_t)
+            entropy       = dist.entropy()
+
+            ratio = torch.exp(new_log_probs - old_lp_t)
+            surr1 = ratio * advantages_t
+            surr2 = torch.clamp(ratio, 1.0 - ppo_clip, 1.0 + ppo_clip) * advantages_t
+            policy_loss  = -torch.min(surr1, surr2).mean()
+
+            value_loss   = F.mse_loss(values, returns_t)
+            entropy_loss = -entropy_coef * entropy.mean()
+
+            loss = policy_loss + value_loss_coef * value_loss + entropy_loss
+
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
+            optimizer.step()
 
         # ── Logging ───────────────────────────────────────────────────────────
-        episode_reward = sum(ep_rewards)
-        total_reward  += episode_reward
+        total_reward += batch_return_sum
         reward_history.append(total_reward)
 
-        if (episode + 1) % 50 == 0 or episode == 0:
+        if (batch_idx + 1) % 10 == 0 or batch_idx == 0:
             print(
-                f"Episode {episode+1:4d} | phase={curriculum_phase} | "
-                f"ep_return={episode_return:6.2f} | baseline={baseline:6.2f} | "
-                f"phase_hit={ep_phase_hit} | full_hit={episode_hit} | "
-                f"total={total_reward:.1f}",
+                f"Batch {batch_idx+1:4d}/{num_batches} | ep={global_episode:5d} | "
+                f"phase={curriculum_phase} | "
+                f"full_hit_rate={batch_full_hits/batch_episodes:.2f} | "
+                f"avg_return={batch_return_sum/batch_episodes:.2f} | "
+                f"policy_loss={policy_loss.item():.4f} | "
+                f"value_loss={value_loss.item():.4f}",
                 flush=True
             )
 
