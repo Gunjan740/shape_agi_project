@@ -49,9 +49,8 @@ def compute_reward(state, target_shape, target_color, target_size, phase):
     """
     Compute per-step reward and phase-hit flag based on curriculum phase.
 
-    Phase 1: shape only
-    Phase 2: shape + color
-    Phase 3: shape + color + size (full task)
+    Phase 1: shape + size (actions 2/3 control shape_size_idx — both change together)
+    Phase 2: full task (shape + size + color)
 
     phase_hit  — used to advance curriculum
     episode_hit — full-tuple match, used for the episodic bonus (evaluation metric)
@@ -60,23 +59,19 @@ def compute_reward(state, target_shape, target_color, target_size, phase):
     color_match = state["color"] == target_color
     size_match  = state["size"]  == target_size
 
-    full_match  = shape_match and color_match and size_match
-    phase_hit   = False
+    full_match = shape_match and color_match and size_match
+    phase_hit  = False
 
     if phase == 1:
-        reward    = 1.0 if shape_match else 0.0
-        phase_hit = shape_match
-
-    elif phase == 2:
-        if shape_match and color_match:
+        if shape_match and size_match:
             reward    = 2.0
             phase_hit = True
-        elif shape_match:
-            reward = 0.5
         else:
             reward = 0.0
+            if shape_match: reward += 0.3
+            if size_match:  reward += 0.3
 
-    else:  # phase 3 — full task with partial credit
+    else:  # phase 2 — full task with partial credit
         if full_match:
             reward    = 3.0
             phase_hit = True
@@ -244,7 +239,7 @@ def main():
 
         # ── Curriculum advancement ─────────────────────────────────────────────
         phase_window.append(float(ep_phase_hit))
-        if curriculum_phase < 3 and len(phase_window) == curriculum_window:
+        if curriculum_phase < 2 and len(phase_window) == curriculum_window:
             hit_rate = sum(phase_window) / len(phase_window)
             if hit_rate >= curriculum_thresh:
                 curriculum_phase += 1
