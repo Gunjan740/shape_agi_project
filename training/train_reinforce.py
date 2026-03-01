@@ -134,7 +134,9 @@ def main():
     curriculum_thresh  = float(train_cfg.get("curriculum_threshold", 0.3))
     steps_per_episode  = int(train_cfg.get("steps_per_episode", 20))
 
-    optimizer = torch.optim.Adam(policy.parameters(), lr=learning_rate)
+    # Only optimize encoder + head — value_head is not used in REINFORCE
+    reinforce_params = list(policy.encoder.parameters()) + list(policy.head.parameters())
+    optimizer = torch.optim.Adam(reinforce_params, lr=learning_rate)
     num_episodes      = num_steps // steps_per_episode
 
     total_reward  = 0.0
