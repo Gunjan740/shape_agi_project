@@ -18,10 +18,11 @@ class Policy(nn.Module):
         self.delay_ms = delay_ms
         self.goal_dim = int(goal_dim)
 
-        self.encoder = CNNEncoder()
+        self.encoder = CNNEncoder(goal_dim=self.goal_dim)
 
         dummy_input = torch.zeros(1, 3, 144, 144)
-        dummy_features = self.encoder(dummy_input)
+        dummy_goal  = torch.zeros(1, self.goal_dim) if self.goal_dim > 0 else None
+        dummy_features = self.encoder(dummy_input, dummy_goal)
         feature_dim = dummy_features.shape[1]
 
         self.head = PolicyHead(input_dim=feature_dim + self.goal_dim)
@@ -34,12 +35,13 @@ class Policy(nn.Module):
         )
 
     def _encode(self, obs: torch.Tensor, goal: torch.Tensor = None) -> torch.Tensor:
-        features = self.encoder(obs)
         if self.goal_dim > 0:
             if goal is None:
                 raise ValueError("goal must be provided when goal_dim > 0")
-            if goal.dim() != 2 or goal.size(0) != features.size(0) or goal.size(1) != self.goal_dim:
+            if goal.dim() != 2 or goal.size(0) != obs.size(0) or goal.size(1) != self.goal_dim:
                 raise ValueError(f"goal must have shape (B, {self.goal_dim}), got {tuple(goal.shape)}")
+        features = self.encoder(obs, goal)
+        if self.goal_dim > 0:
             return torch.cat([features, goal.to(obs.device)], dim=1)
         return features
 

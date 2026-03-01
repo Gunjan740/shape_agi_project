@@ -176,7 +176,7 @@ def main():
         # ── Collect full episode trajectory ───────────────────────────────────
         for _ in range(steps_per_episode):
 
-            features = policy.encoder(obs)
+            features = policy.encoder(obs, goal_vec)
             x = torch.cat([features, goal_vec], dim=1)
             logits = policy.head(x)
 
