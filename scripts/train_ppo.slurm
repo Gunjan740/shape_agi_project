@@ -33,7 +33,7 @@ nvidia-smi
 echo "Running training..."
 
 python -m training.train \
-  --config configs/base.yaml \
+  --config configs/ppo.yaml \
   --seed 123 \
   --output_dir results/cluster_run_${SLURM_JOB_ID}
 
