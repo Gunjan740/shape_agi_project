@@ -173,7 +173,7 @@ def main():
     last_ckpt_episode = 0
 
     if latest_path.exists():
-        ckpt = torch.load(latest_path, map_location=device)
+        ckpt = torch.load(latest_path, map_location=device, weights_only=False)
         policy.load_state_dict(ckpt["policy_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         start_batch      = ckpt["batch_idx"] + 1
