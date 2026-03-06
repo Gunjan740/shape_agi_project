@@ -290,7 +290,7 @@ def main():
                 flush=True
             )
 
-        if (episode + 1) % 1000 == 0:
+        if (episode + 1) % 500 == 0:
             _np_st = np.random.get_state()
             ckpt = {
                 "policy_state_dict":    policy.state_dict(),
@@ -312,6 +312,7 @@ def main():
                 ckpt["rng_cuda"] = torch.cuda.get_rng_state_all()
             torch.save(ckpt, ckpt_dir / f"checkpoint_ep_{episode + 1}.pt")
             torch.save(ckpt, latest_path)
+            print(f"Checkpoint saved at episode {episode + 1} → {latest_path}", flush=True)
 
     print("Training finished.")
     print("Total reward:", total_reward)
