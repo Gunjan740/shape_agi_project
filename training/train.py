@@ -166,12 +166,14 @@ def main():
     curriculum_phase = 1
     phase_window     = collections.deque(maxlen=curriculum_window)
 
-    checkpoint_path  = output_path / "checkpoint.pt"
+    ckpt_dir         = Path(__file__).parent.parent / "checkpoints_ppo"
+    ckpt_dir.mkdir(exist_ok=True)
+    latest_path      = ckpt_dir / "latest.pt"
     start_batch      = 0
     last_ckpt_episode = 0
 
-    if checkpoint_path.exists():
-        ckpt = torch.load(checkpoint_path, map_location=device)
+    if latest_path.exists():
+        ckpt = torch.load(latest_path, map_location=device)
         policy.load_state_dict(ckpt["policy_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         start_batch      = ckpt["batch_idx"] + 1
@@ -357,7 +359,8 @@ def main():
             }
             if torch.cuda.is_available():
                 ckpt["rng_cuda"] = torch.cuda.get_rng_state_all()
-            torch.save(ckpt, checkpoint_path)
+            torch.save(ckpt, ckpt_dir / f"checkpoint_ep_{global_episode}.pt")
+            torch.save(ckpt, latest_path)
             last_ckpt_episode = global_episode
 
     print("Training finished.")
@@ -365,8 +368,8 @@ def main():
 
     torch.save(policy.state_dict(), output_path / "model.pt")
 
-    if checkpoint_path.exists():
-        checkpoint_path.unlink()
+    if latest_path.exists():
+        latest_path.unlink()
 
     metrics = {
         "total_reward": total_reward,
