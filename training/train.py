@@ -373,9 +373,6 @@ def main():
 
     torch.save(policy.state_dict(), output_path / "model.pt")
 
-    if latest_path.exists():
-        latest_path.unlink()
-
     metrics = {
         "total_reward": total_reward,
         "num_steps": num_steps,
