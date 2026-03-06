@@ -184,7 +184,7 @@ def main():
         reward_history   = ckpt["reward_history"]
         last_ckpt_episode = global_episode
         random.setstate(ckpt["rng_random"])
-        np.random.set_state(('MT19937', ckpt["rng_numpy_arr"].numpy().astype(np.uint32),
+        np.random.set_state(('MT19937', ckpt["rng_numpy_arr"].cpu().numpy().astype(np.uint32),
                              ckpt["rng_numpy_pos"], ckpt["rng_numpy_hg"], ckpt["rng_numpy_cg"]))
         torch.set_rng_state(ckpt["rng_torch"].cpu().to(torch.uint8))
         if torch.cuda.is_available() and "rng_cuda" in ckpt:
@@ -356,7 +356,7 @@ def main():
                 "total_reward":         total_reward,
                 "reward_history":       reward_history,
                 "rng_random":           random.getstate(),
-                "rng_numpy_arr":        torch.from_numpy(_np_st[1].copy()),
+                "rng_numpy_arr":        torch.from_numpy(_np_st[1].copy()).cpu(),
                 "rng_numpy_pos":        _np_st[2],
                 "rng_numpy_hg":         _np_st[3],
                 "rng_numpy_cg":         _np_st[4],
