@@ -167,7 +167,7 @@ def main():
         reward_history   = ckpt["reward_history"]
         random.setstate(ckpt["rng_random"])
         np.random.set_state(ckpt["rng_numpy"])
-        torch.set_rng_state(ckpt["rng_torch"])
+        torch.set_rng_state(ckpt["rng_torch"].cpu().to(torch.uint8))
         if torch.cuda.is_available() and "rng_cuda" in ckpt:
             torch.cuda.set_rng_state_all(ckpt["rng_cuda"])
         print(f"Resuming from episode {start_episode}", flush=True)
