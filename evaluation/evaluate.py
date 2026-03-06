@@ -142,6 +142,10 @@ def main():
 
     success_count = 0
     compute_times = []
+    steps_to_success = []
+    shape_hits = 0
+    color_hits = 0
+    size_hits  = 0
 
     print("\nStarting evaluation...\n", flush=True)
 
@@ -191,9 +195,13 @@ def main():
             )
 
         episode_success = False
+        episode_step_success = None
         did_goal_sensitivity_check = False
+        ep_shape_hit = False
+        ep_color_hit = False
+        ep_size_hit  = False
 
-        for _ in range(args.steps_per_episode):
+        for step_num in range(args.steps_per_episode):
 
             def policy_fn(state):
                 nonlocal did_goal_sensitivity_check
@@ -229,12 +237,16 @@ def main():
             # Check ALL intermediate sim states — catches success even if later
             # sim steps move away from goal (important for System 2 with many steps)
             for state in states:
+                if state["shape"] == target_shape: ep_shape_hit = True
+                if state["color"] == target_color: ep_color_hit = True
+                if state["size"]  == target_size:  ep_size_hit  = True
                 if (
                     state["shape"] == target_shape
                     and state["color"] == target_color
                     and state["size"] == target_size
                 ):
                     episode_success = True
+                    episode_step_success = step_num + 1
                     break
 
             if episode_success:
@@ -242,15 +254,30 @@ def main():
 
         if episode_success:
             success_count += 1
+            steps_to_success.append(episode_step_success)
 
-        print(f"Episode {ep+1}/{args.episodes} | success={episode_success}", flush=True)
+        if ep_shape_hit: shape_hits += 1
+        if ep_color_hit: color_hits += 1
+        if ep_size_hit:  size_hits  += 1
+
+        print(f"Episode {ep+1}/{args.episodes} | success={episode_success} | "
+              f"shape={ep_shape_hit} | color={ep_color_hit} | size={ep_size_hit}",
+              flush=True)
 
     success_rate = success_count / args.episodes
     avg_compute_time_ms = np.mean(compute_times) * 1000
+    avg_steps_to_success = float(np.mean(steps_to_success)) if steps_to_success else None
+    shape_accuracy = shape_hits / args.episodes
+    color_accuracy = color_hits / args.episodes
+    size_accuracy  = size_hits  / args.episodes
 
     print("\nEvaluation finished.")
     print("Success rate:", success_rate)
     print("Avg compute time (ms):", avg_compute_time_ms)
+    print("Avg steps to success:", avg_steps_to_success)
+    print("Shape accuracy:", shape_accuracy)
+    print("Color accuracy:", color_accuracy)
+    print("Size accuracy:", size_accuracy)
 
     output_path = Path(args.output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -258,6 +285,10 @@ def main():
     results = {
         "success_rate": success_rate,
         "avg_compute_time_ms": avg_compute_time_ms,
+        "avg_steps_to_success": avg_steps_to_success,
+        "shape_accuracy": shape_accuracy,
+        "color_accuracy": color_accuracy,
+        "size_accuracy": size_accuracy,
         "delay_ms": args.delay_ms,
         "episodes": args.episodes,
         "steps_per_episode": args.steps_per_episode,
