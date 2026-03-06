@@ -166,10 +166,32 @@ def main():
     curriculum_phase = 1
     phase_window     = collections.deque(maxlen=curriculum_window)
 
+    checkpoint_path  = output_path / "checkpoint.pt"
+    start_batch      = 0
+    last_ckpt_episode = 0
+
+    if checkpoint_path.exists():
+        ckpt = torch.load(checkpoint_path, map_location=device)
+        policy.load_state_dict(ckpt["policy_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        start_batch      = ckpt["batch_idx"] + 1
+        global_episode   = ckpt["global_episode"]
+        curriculum_phase = ckpt["curriculum_phase"]
+        phase_window     = collections.deque(ckpt["phase_window"], maxlen=curriculum_window)
+        total_reward     = ckpt["total_reward"]
+        reward_history   = ckpt["reward_history"]
+        last_ckpt_episode = global_episode
+        random.setstate(ckpt["rng_random"])
+        np.random.set_state(ckpt["rng_numpy"])
+        torch.set_rng_state(ckpt["rng_torch"])
+        if torch.cuda.is_available() and "rng_cuda" in ckpt:
+            torch.cuda.set_rng_state_all(ckpt["rng_cuda"])
+        print(f"Resuming from episode {global_episode}", flush=True)
+
     print(f"\nStarting PPO training (curriculum phase {curriculum_phase})...", flush=True)
     print(f"  Episodes: {num_episodes} | Batches: {num_batches} | batch_episodes: {batch_episodes}", flush=True)
 
-    for batch_idx in range(num_batches):
+    for batch_idx in range(start_batch, num_batches):
 
         # ── Collect batch_episodes rollouts (no_grad) ─────────────────────────
         all_obs        = []
@@ -319,10 +341,32 @@ def main():
                 flush=True
             )
 
+        if global_episode - last_ckpt_episode >= 1000:
+            ckpt = {
+                "policy_state_dict":    policy.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "batch_idx":            batch_idx,
+                "global_episode":       global_episode,
+                "curriculum_phase":     curriculum_phase,
+                "phase_window":         list(phase_window),
+                "total_reward":         total_reward,
+                "reward_history":       reward_history,
+                "rng_random":           random.getstate(),
+                "rng_numpy":            np.random.get_state(),
+                "rng_torch":            torch.get_rng_state(),
+            }
+            if torch.cuda.is_available():
+                ckpt["rng_cuda"] = torch.cuda.get_rng_state_all()
+            torch.save(ckpt, checkpoint_path)
+            last_ckpt_episode = global_episode
+
     print("Training finished.")
     print("Total reward:", total_reward)
 
     torch.save(policy.state_dict(), output_path / "model.pt")
+
+    if checkpoint_path.exists():
+        checkpoint_path.unlink()
 
     metrics = {
         "total_reward": total_reward,

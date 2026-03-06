@@ -150,9 +150,29 @@ def main():
     curriculum_phase = 1
     phase_window     = collections.deque(maxlen=curriculum_window)
 
+    checkpoint_path = output_path / "checkpoint.pt"
+    start_episode = 0
+
+    if checkpoint_path.exists():
+        ckpt = torch.load(checkpoint_path, map_location=device)
+        policy.load_state_dict(ckpt["policy_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        start_episode    = ckpt["episode"] + 1
+        curriculum_phase = ckpt["curriculum_phase"]
+        phase_window     = collections.deque(ckpt["phase_window"], maxlen=curriculum_window)
+        baseline         = ckpt["baseline"]
+        total_reward     = ckpt["total_reward"]
+        reward_history   = ckpt["reward_history"]
+        random.setstate(ckpt["rng_random"])
+        np.random.set_state(ckpt["rng_numpy"])
+        torch.set_rng_state(ckpt["rng_torch"])
+        if torch.cuda.is_available() and "rng_cuda" in ckpt:
+            torch.cuda.set_rng_state_all(ckpt["rng_cuda"])
+        print(f"Resuming from episode {start_episode}", flush=True)
+
     print(f"\nStarting episodic training loop (curriculum phase {curriculum_phase})...", flush=True)
 
-    for episode in range(num_episodes):
+    for episode in range(start_episode, num_episodes):
 
         obs = env.reset().to(device)
 
@@ -267,10 +287,31 @@ def main():
                 flush=True
             )
 
+        if (episode + 1) % 1000 == 0:
+            ckpt = {
+                "policy_state_dict":    policy.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "episode":              episode,
+                "curriculum_phase":     curriculum_phase,
+                "phase_window":         list(phase_window),
+                "baseline":             baseline,
+                "total_reward":         total_reward,
+                "reward_history":       reward_history,
+                "rng_random":           random.getstate(),
+                "rng_numpy":            np.random.get_state(),
+                "rng_torch":            torch.get_rng_state(),
+            }
+            if torch.cuda.is_available():
+                ckpt["rng_cuda"] = torch.cuda.get_rng_state_all()
+            torch.save(ckpt, checkpoint_path)
+
     print("Training finished.")
     print("Total reward:", total_reward)
 
     torch.save(policy.state_dict(), output_path / "model.pt")
+
+    if checkpoint_path.exists():
+        checkpoint_path.unlink()
 
     metrics = {
         "total_reward": total_reward,
