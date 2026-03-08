@@ -259,7 +259,7 @@ def main():
 
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(reinforce_params, 0.5)
+        torch.nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
         optimizer.step()
 
         # ── Curriculum advancement ─────────────────────────────────────────────
