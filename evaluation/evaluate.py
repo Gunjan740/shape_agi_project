@@ -168,9 +168,6 @@ def main():
 
     # Benchmark without delay so System 2's thinking time registers as extra env steps
     policy.delay_ms = 0
-    dummy_state = env.state.clone()
-    for _ in range(5):
-        benchmark_policy_fn(dummy_state)
     env.benchmark_policy(benchmark_policy_fn)
     policy.delay_ms = args.delay_ms  # restore
     print("Real-time benchmark done.", flush=True)
