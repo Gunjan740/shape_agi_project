@@ -1,5 +1,5 @@
 env:
-  time_scaling: 5.0
+  time_scaling: 1.0
   noisy: false
 
 policy:
