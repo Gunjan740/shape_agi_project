@@ -146,6 +146,7 @@ def main():
     shape_hits = 0
     color_hits = 0
     size_hits  = 0
+    sim_steps_per_call = []
 
     print("\nStarting evaluation...\n", flush=True)
 
@@ -233,6 +234,7 @@ def main():
             # env.step returns (observations, states, info) with return_states=True
             obs, states, _ = env.step(policy_fn)
             obs = obs.to(device)
+            sim_steps_per_call.append(len(states))
 
             # Check ALL intermediate sim states — catches success even if later
             # sim steps move away from goal (important for System 2 with many steps)
@@ -270,6 +272,8 @@ def main():
     shape_accuracy = shape_hits / args.episodes
     color_accuracy = color_hits / args.episodes
     size_accuracy  = size_hits  / args.episodes
+    avg_sim_steps  = float(np.mean(sim_steps_per_call))
+    std_sim_steps  = float(np.std(sim_steps_per_call))
 
     print("\nEvaluation finished.")
     print("Success rate:", success_rate)
@@ -278,6 +282,7 @@ def main():
     print("Shape accuracy:", shape_accuracy)
     print("Color accuracy:", color_accuracy)
     print("Size accuracy:", size_accuracy)
+    print(f"Sim steps per policy call: {avg_sim_steps:.2f} ± {std_sim_steps:.2f}")
 
     output_path = Path(args.output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -289,6 +294,8 @@ def main():
         "shape_accuracy": shape_accuracy,
         "color_accuracy": color_accuracy,
         "size_accuracy": size_accuracy,
+        "avg_sim_steps_per_call": avg_sim_steps,
+        "std_sim_steps_per_call": std_sim_steps,
         "delay_ms": args.delay_ms,
         "episodes": args.episodes,
         "steps_per_episode": args.steps_per_episode,
