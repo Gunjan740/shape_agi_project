@@ -212,14 +212,15 @@ def main():
                 # One-time goal sensitivity test
                 if ep == 0 and (not did_goal_sensitivity_check):
                     with torch.no_grad():
-                        feat = policy.encoder(state)
                         alt_shape = possible_shapes[(shape_to_i[target_shape] + 1) % len(possible_shapes)]
                         g2 = make_goal_vec(
                             alt_shape, target_color, target_size,
                             shape_to_i, color_to_i, size_to_i, goal_dim, device,
                         )
-                        logits1 = policy.head(torch.cat([feat, goal_vec], dim=1))
-                        logits2 = policy.head(torch.cat([feat, g2], dim=1))
+                        feat1 = policy.encoder(state, goal_vec)
+                        feat2 = policy.encoder(state, g2)
+                        logits1 = policy.head(torch.cat([feat1, goal_vec], dim=1))
+                        logits2 = policy.head(torch.cat([feat2, g2], dim=1))
                         diff = (logits1 - logits2).abs().mean().item()
                         print("GOAL_SENSITIVITY_MEAN_ABS_LOGIT_DIFF:", diff, flush=True)
                     did_goal_sensitivity_check = True
