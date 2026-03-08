@@ -166,6 +166,11 @@ def main():
         with torch.no_grad():
             return policy.act(state, dummy_goal)
 
+    # Warmup: run policy a few times so CUDA/JIT is hot before benchmarking
+    dummy_state = env.state.clone()
+    for _ in range(5):
+        benchmark_policy_fn(dummy_state)
+
     env.benchmark_policy(benchmark_policy_fn)
     print("Real-time benchmark done.", flush=True)
 
