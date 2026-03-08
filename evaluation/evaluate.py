@@ -232,9 +232,14 @@ def main():
                 return action
 
             # env.step returns (observations, states, info) with return_states=True
-            obs, states, _ = env.step(policy_fn)
+            obs, states, info = env.step(policy_fn)
             obs = obs.to(device)
-            sim_steps_per_call.append(len(states))
+            sim_steps_per_call.append(info["num_environment_steps"])
+
+            if ep == 0 and step_num == 0:
+                print(f"DEBUG timing | benchmark_policy_time_ms={info['benchmark_policy_time_ms']:.3f} "
+                      f"actual_policy_time_ms={info['actual_policy_time_ms']:.3f} "
+                      f"num_env_steps={info['num_environment_steps']}", flush=True)
 
             # Check ALL intermediate sim states — catches success even if later
             # sim steps move away from goal (important for System 2 with many steps)
