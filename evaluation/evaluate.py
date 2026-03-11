@@ -19,10 +19,9 @@ def parse_args():
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--delay_ms", type=int, default=0)
-    parser.add_argument("--episodes", type=int, default=100)
-    parser.add_argument("--steps_per_episode", type=int, default=20)
+    parser.add_argument("--episodes", type=int, default=50)
+    parser.add_argument("--steps_per_episode", type=int, default=10)
     parser.add_argument("--seed", type=int, default=123)
-    parser.add_argument("--noisy", action="store_true", default=False)
     parser.add_argument("--output_dir", type=str, required=True)
 
     return parser.parse_args()
@@ -41,29 +40,16 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-def _to_policy_input(state, device, avg_frames=False):
-    """
-    Prepare observation for policy input.
-
-    System 1 (avg_frames=False): use only the last frame.
-    System 2 (avg_frames=True):  average all frames in the stack — temporal
-                                  smoothing from real-time delay accumulation.
-    """
+def _to_policy_input(state, device):
     state = state.to(device)
 
     if state.dim() == 3:
         state = state.unsqueeze(0)
     elif state.dim() == 4:
         if state.size(0) != 1:
-            if avg_frames:
-                state = state.mean(dim=0, keepdim=True)   # (N,C,H,W) → (1,C,H,W)
-            else:
-                state = state[-1].unsqueeze(0)             # last frame only
+            state = state[-1].unsqueeze(0)
     elif state.dim() == 5:
-        if avg_frames:
-            state = state.mean(dim=1)                      # (B,N,C,H,W) → (B,C,H,W)
-        else:
-            state = state[:, -1, ...]
+        state = state[:, -1, ...]
     else:
         raise ValueError(f"Unexpected state shape: {state.shape}")
 
@@ -100,25 +86,21 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device, flush=True)
     print("Evaluation seed:", args.seed, flush=True)
-    print("Noisy:", args.noisy, flush=True)
 
     config = load_config(args.config)
-    env_cfg = config.get("env", {})
 
-    # noisy: CLI flag overrides config; use return_states=True to check
-    # all intermediate sim states within each env.step() for success
-    noisy = args.noisy or bool(env_cfg.get("noisy", False))
+    env_cfg = config.get("env", {})
 
     env = ShapeEnv(
         time_scaling=float(env_cfg.get("time_scaling", 1.0)),
-        noisy=noisy,
+        noisy=bool(env_cfg.get("noisy", False)),
         random_initial=True,
         device=str(device),
-        return_states=True,
     )
 
     print("Environment ready.", flush=True)
 
+    # ---- goal dims from env lists ----
     possible_shapes = env.shapes_list
     possible_colors = env.colors_list
     possible_sizes = env.sizes_list
@@ -142,15 +124,10 @@ def main():
 
     success_count = 0
     compute_times = []
-    steps_to_success = []
-    shape_hits = 0
-    color_hits = 0
-    size_hits  = 0
-    sim_steps_per_call = []
 
     print("\nStarting evaluation...\n", flush=True)
 
-    # Pre-generate targets so System 1 vs System 2 are comparable
+    # ---- Pre-generate targets so System1 vs System2 are comparable ----
     targets = []
     for _ in range(args.episodes):
         t_shape = np.random.choice(possible_shapes)
@@ -158,22 +135,36 @@ def main():
         t_size = np.random.choice(possible_sizes)
         targets.append((t_shape, t_color, t_size))
 
-    # Real-time benchmark
+    # ---- Real-time benchmark dummy goal ----
     dummy_goal = torch.zeros(1, goal_dim, device=device)
 
-    def benchmark_policy_fn(state):
-        state = _to_policy_input(state, device, avg_frames=False)  # benchmark always uses last frame
+    # ---- GPU warm-up before benchmark ----
+    warm_obs = env.reset().to(device)
+    warm_state = _to_policy_input(warm_obs, device)
+    for _ in range(20):
         with torch.no_grad():
-            return policy.act(state, dummy_goal)
+            _ = policy.act(warm_state, dummy_goal)
+        if device.type == "cuda":
+            torch.cuda.synchronize()
 
-    # Benchmark without delay so System 2's thinking time registers as extra env steps
-    policy.delay_ms = 0
+    def benchmark_policy_fn(state):
+        state = _to_policy_input(state, device)
+
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+
+        with torch.no_grad():
+            action = policy.act(state, dummy_goal)
+
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+
+        return action
+
     env.benchmark_policy(benchmark_policy_fn)
-    policy.delay_ms = args.delay_ms  # restore
     print("Real-time benchmark done.", flush=True)
 
     for ep in range(args.episodes):
-
         obs = env.reset().to(device)
 
         target_shape, target_color, target_size = targets[ep]
@@ -199,99 +190,84 @@ def main():
             )
 
         episode_success = False
-        episode_step_success = None
         did_goal_sensitivity_check = False
-        ep_shape_hit = False
-        ep_color_hit = False
-        ep_size_hit  = False
 
-        for step_num in range(args.steps_per_episode):
+        for step in range(args.steps_per_episode):
 
             def policy_fn(state):
                 nonlocal did_goal_sensitivity_check
 
-                state = _to_policy_input(state, device, avg_frames=(args.delay_ms > 0))
+                state = _to_policy_input(state, device)
 
-                # One-time goal sensitivity test
                 if ep == 0 and (not did_goal_sensitivity_check):
                     with torch.no_grad():
+                        feat = policy.encoder(state)
+
                         alt_shape = possible_shapes[(shape_to_i[target_shape] + 1) % len(possible_shapes)]
                         g2 = make_goal_vec(
-                            alt_shape, target_color, target_size,
-                            shape_to_i, color_to_i, size_to_i, goal_dim, device,
+                            alt_shape,
+                            target_color,
+                            target_size,
+                            shape_to_i,
+                            color_to_i,
+                            size_to_i,
+                            goal_dim,
+                            device,
                         )
-                        feat1 = policy.encoder(state, goal_vec)
-                        feat2 = policy.encoder(state, g2)
-                        logits1 = policy.head(torch.cat([feat1, goal_vec], dim=1))
-                        logits2 = policy.head(torch.cat([feat2, g2], dim=1))
+
+                        logits1 = policy.head(torch.cat([feat, goal_vec], dim=1))
+                        logits2 = policy.head(torch.cat([feat, g2], dim=1))
                         diff = (logits1 - logits2).abs().mean().item()
+
                         print("GOAL_SENSITIVITY_MEAN_ABS_LOGIT_DIFF:", diff, flush=True)
+
                     did_goal_sensitivity_check = True
 
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
                 start_time = time.time()
+
                 with torch.no_grad():
                     action = policy.act(state, goal_vec)
+
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
                 compute_times.append(time.time() - start_time)
 
                 return action
 
-            # env.step returns (observations, states, info) with return_states=True
-            obs, states, info = env.step(policy_fn)
+            step_out = env.step(policy_fn)
+
+            if isinstance(step_out, tuple):
+                obs, info = step_out
+            else:
+                obs, info = step_out, None
+
+            if ep < 2 and step < 2 and info is not None:
+                print("DEBUG info:", info, flush=True)
+
             obs = obs.to(device)
-            sim_steps_per_call.append(info["num_environment_steps"])
 
-            if ep == 0 and step_num == 0:
-                print(f"DEBUG timing | benchmark_policy_time_ms={info['benchmark_policy_time_ms']:.3f} "
-                      f"actual_policy_time_ms={info['actual_policy_time_ms']:.3f} "
-                      f"num_env_steps={info['num_environment_steps']}", flush=True)
+            state = env._get_state()
 
-            # Check ALL intermediate sim states — catches success even if later
-            # sim steps move away from goal (important for System 2 with many steps)
-            for state in states:
-                if state["shape"] == target_shape: ep_shape_hit = True
-                if state["color"] == target_color: ep_color_hit = True
-                if state["size"]  == target_size:  ep_size_hit  = True
-                if (
-                    state["shape"] == target_shape
-                    and state["color"] == target_color
-                    and state["size"] == target_size
-                ):
-                    episode_success = True
-                    episode_step_success = step_num + 1
-                    break
-
-            if episode_success:
-                break  # no need to continue the episode
+            if (
+                state["shape"] == target_shape
+                and state["color"] == target_color
+                and state["size"] == target_size
+            ):
+                episode_success = True
 
         if episode_success:
             success_count += 1
-            steps_to_success.append(episode_step_success)
 
-        if ep_shape_hit: shape_hits += 1
-        if ep_color_hit: color_hits += 1
-        if ep_size_hit:  size_hits  += 1
-
-        print(f"Episode {ep+1}/{args.episodes} | success={episode_success} | "
-              f"shape={ep_shape_hit} | color={ep_color_hit} | size={ep_size_hit}",
-              flush=True)
+        print(f"Episode {ep+1}/{args.episodes} | success={episode_success}", flush=True)
 
     success_rate = success_count / args.episodes
     avg_compute_time_ms = np.mean(compute_times) * 1000
-    avg_steps_to_success = float(np.mean(steps_to_success)) if steps_to_success else None
-    shape_accuracy = shape_hits / args.episodes
-    color_accuracy = color_hits / args.episodes
-    size_accuracy  = size_hits  / args.episodes
-    avg_sim_steps  = float(np.mean(sim_steps_per_call))
-    std_sim_steps  = float(np.std(sim_steps_per_call))
 
     print("\nEvaluation finished.")
     print("Success rate:", success_rate)
     print("Avg compute time (ms):", avg_compute_time_ms)
-    print("Avg steps to success:", avg_steps_to_success)
-    print("Shape accuracy:", shape_accuracy)
-    print("Color accuracy:", color_accuracy)
-    print("Size accuracy:", size_accuracy)
-    print(f"Sim steps per policy call: {avg_sim_steps:.2f} ± {std_sim_steps:.2f}")
 
     output_path = Path(args.output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -299,16 +275,9 @@ def main():
     results = {
         "success_rate": success_rate,
         "avg_compute_time_ms": avg_compute_time_ms,
-        "avg_steps_to_success": avg_steps_to_success,
-        "shape_accuracy": shape_accuracy,
-        "color_accuracy": color_accuracy,
-        "size_accuracy": size_accuracy,
-        "avg_sim_steps_per_call": avg_sim_steps,
-        "std_sim_steps_per_call": std_sim_steps,
         "delay_ms": args.delay_ms,
         "episodes": args.episodes,
         "steps_per_episode": args.steps_per_episode,
-        "noisy": noisy,
         "seed": args.seed,
         "goal_dim": goal_dim,
     }
