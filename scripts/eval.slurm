@@ -30,6 +30,12 @@ DELAY_MS=$1
 MODEL_PATH=$2
 SEED=$3
 FIXED_BENCHMARK_MS=$4
+NOISY=$5
+
+NOISY_FLAG=""
+if [ "$NOISY" = "noisy" ]; then
+  NOISY_FLAG="--noisy"
+fi
 
 CMD="python -m evaluation.evaluate \
   --config configs/base.yaml \
@@ -38,6 +44,7 @@ CMD="python -m evaluation.evaluate \
   --episodes 200 \
   --steps_per_episode 20 \
   --seed ${SEED} \
+  ${NOISY_FLAG} \
   --output_dir results/eval_delay_${DELAY_MS}_seed_${SEED}_${SLURM_JOB_ID}"
 
 if [ -n "${FIXED_BENCHMARK_MS}" ]; then
