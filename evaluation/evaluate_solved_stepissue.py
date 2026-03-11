@@ -139,19 +139,6 @@ def main():
     success_count = 0
     compute_times = []
 
-    env_steps_list = []
-    first_success_steps = []
-
-    shape_match_count = 0
-    color_match_count = 0
-    size_match_count = 0
-    state_check_count = 0
-
-    action_changes = 0
-    action_total_transitions = 0
-
-    goal_sensitivity_diff = None
-
     print("\nStarting evaluation...\n", flush=True)
 
     # Pre-generate targets so System 1 vs System 2 are comparable
@@ -164,7 +151,7 @@ def main():
 
     dummy_goal = torch.zeros(1, goal_dim, device=device)
 
-    # GPU warm-up
+    # ---- GPU warm-up ----
     warm_obs = env.reset().to(device)
     warm_state = _to_policy_input(warm_obs, device, avg_frames=False)
     for _ in range(20):
@@ -221,16 +208,11 @@ def main():
 
         episode_success = False
         did_goal_sensitivity_check = False
-        prev_action_index = None
 
         for step in range(args.steps_per_episode):
 
             def policy_fn(state):
                 nonlocal did_goal_sensitivity_check
-                nonlocal prev_action_index
-                nonlocal action_changes
-                nonlocal action_total_transitions
-                nonlocal goal_sensitivity_diff
 
                 state = _to_policy_input(state, device, avg_frames=(args.delay_ms > 0))
 
@@ -251,7 +233,6 @@ def main():
                         logits1 = policy.head(torch.cat([feat, goal_vec], dim=1))
                         logits2 = policy.head(torch.cat([feat, g2], dim=1))
                         diff = (logits1 - logits2).abs().mean().item()
-                        goal_sensitivity_diff = diff
                         print("GOAL_SENSITIVITY_MEAN_ABS_LOGIT_DIFF:", diff, flush=True)
                     did_goal_sensitivity_check = True
 
@@ -266,43 +247,20 @@ def main():
                     torch.cuda.synchronize()
                 compute_times.append(time.time() - start_time)
 
-                curr_action_index = int(torch.argmax(action).item())
-                if prev_action_index is not None:
-                    action_total_transitions += 1
-                    if curr_action_index != prev_action_index:
-                        action_changes += 1
-                prev_action_index = curr_action_index
-
                 return action
 
             obs, states, info = env.step(policy_fn)
             obs = obs.to(device)
 
-            if info is not None:
-                env_steps_list.append(info["num_environment_steps"])
-
             if ep < 2 and step < 2:
                 print("DEBUG info:", info, flush=True)
 
             for state in states:
-                state_check_count += 1
-
-                if state["shape"] == target_shape:
-                    shape_match_count += 1
-                if state["color"] == target_color:
-                    color_match_count += 1
-                if state["size"] == target_size:
-                    size_match_count += 1
-
-                full_match = (
+                if (
                     state["shape"] == target_shape
                     and state["color"] == target_color
                     and state["size"] == target_size
-                )
-
-                if full_match:
-                    if not episode_success:
-                        first_success_steps.append(step + 1)
+                ):
                     episode_success = True
                     break
 
@@ -315,32 +273,19 @@ def main():
         print(f"Episode {ep+1}/{args.episodes} | success={episode_success}", flush=True)
 
     success_rate = success_count / args.episodes
-    avg_compute_time_ms = np.mean(compute_times) * 1000 if len(compute_times) > 0 else None
-    avg_env_steps = np.mean(env_steps_list) if len(env_steps_list) > 0 else None
-
-    avg_first_success_step = (
-        float(np.mean(first_success_steps)) if len(first_success_steps) > 0 else None
-    )
-
-    action_stability = (
-        1.0 - (action_changes / action_total_transitions)
-        if action_total_transitions > 0 else None
-    )
-
-    shape_match_rate = shape_match_count / state_check_count if state_check_count > 0 else None
-    color_match_rate = color_match_count / state_check_count if state_check_count > 0 else None
-    size_match_rate = size_match_count / state_check_count if state_check_count > 0 else None
+    avg_compute_time_ms = np.mean(compute_times) * 1000
 
     print("\nEvaluation finished.")
     print("Success rate:", success_rate)
     print("Avg compute time (ms):", avg_compute_time_ms)
-    print("Avg num_environment_steps:", avg_env_steps)
-    print("First-success decision step:", avg_first_success_step)
-    print("Action stability:", action_stability)
-    print("Shape match rate:", shape_match_rate)
-    print("Color match rate:", color_match_rate)
-    print("Size match rate:", size_match_rate)
-    print("Goal sensitivity mean abs logit diff:", goal_sensitivity_diff)
+    print("delay_ms:", args.delay_ms)
+    print("episodes:", args.episodes)
+    print("steps_per_episode:", args.steps_per_episode)
+    print("noisy:", noisy)
+    print("seed:", args.seed)
+    print("goal_dim:", goal_dim)
+    print("fixed_benchmark_ms:", args.fixed_benchmark_ms)
+    print("used_benchmark_ms:", float(env.benchmark_policy_time))
 
     output_path = Path(args.output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -348,13 +293,6 @@ def main():
     results = {
         "success_rate": success_rate,
         "avg_compute_time_ms": avg_compute_time_ms,
-        "avg_num_environment_steps": avg_env_steps,
-        "avg_first_success_step": avg_first_success_step,
-        "action_stability": action_stability,
-        "shape_match_rate": shape_match_rate,
-        "color_match_rate": color_match_rate,
-        "size_match_rate": size_match_rate,
-        "goal_sensitivity_mean_abs_logit_diff": goal_sensitivity_diff,
         "delay_ms": args.delay_ms,
         "episodes": args.episodes,
         "steps_per_episode": args.steps_per_episode,
