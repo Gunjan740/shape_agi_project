@@ -15,10 +15,9 @@ echo "GPU(s): $CUDA_VISIBLE_DEVICES"
 
 module purge
 module load devel/cuda/11.8
-module load devel/python/3.10
+module load devel/python/3.10 || true
 
 cd ~/shape_agi_project
-
 mkdir -p logs
 
 source venv/bin/activate
@@ -30,21 +29,22 @@ echo "Running evaluation..."
 DELAY_MS=$1
 MODEL_PATH=$2
 SEED=$3
-NOISY=${4:-""}   # pass "noisy" as 4th arg to enable, e.g. sbatch eval.slurm 0 model.pt 0 noisy
+FIXED_BENCHMARK_MS=$4
 
-NOISY_FLAG=""
-if [ "$NOISY" = "noisy" ]; then
-  NOISY_FLAG="--noisy"
-fi
-
-python -m evaluation.evaluate \
+CMD="python -m evaluation.evaluate \
   --config configs/base.yaml \
   --model_path ${MODEL_PATH} \
   --delay_ms ${DELAY_MS} \
   --episodes 200 \
   --steps_per_episode 20 \
   --seed ${SEED} \
-  ${NOISY_FLAG} \
-  --output_dir results/eval_delay${DELAY_MS}_seed${SEED}_${SLURM_JOB_ID}
+  --output_dir results/eval_delay_${DELAY_MS}_seed_${SEED}_${SLURM_JOB_ID}"
+
+if [ -n "${FIXED_BENCHMARK_MS}" ]; then
+  CMD="${CMD} --fixed_benchmark_ms ${FIXED_BENCHMARK_MS}"
+fi
+
+echo "${CMD}"
+eval ${CMD}
 
 echo "Evaluation finished."
