@@ -196,7 +196,7 @@ def main():
         episode_hit   = False   # full-tuple — for episodic bonus
         ep_phase_hit  = False   # phase-specific — for curriculum advancement
 
-        # ── Collect full episode trajectory ───────────────────────────────────
+        # ── Collect full episode trajectory 
         for _ in range(steps_per_episode):
 
             features = policy.encoder(obs, goal_vec)
@@ -234,7 +234,7 @@ def main():
         if episode_hit:
             ep_rewards[-1] += 5.0
 
-        # ── Compute discounted returns backwards ───────────────────────────────
+        # ── Compute discounted returns backwards 
         returns = []
         G = 0.0
         for r in reversed(ep_rewards):
@@ -242,14 +242,14 @@ def main():
             returns.insert(0, G)
         returns = torch.tensor(returns, dtype=torch.float32, device=device)
 
-        # ── Episode-level baseline update ──────────────────────────────────────
+        # ── Episode-level baseline update 
         episode_return = returns[0].item()
         baseline = baseline_beta * baseline + (1 - baseline_beta) * episode_return
 
-        # ── Advantage ─────────────────────────────────────────────────────────
+        # ── Advantage 
         advantages = returns - baseline
 
-        # ── Single weight update ───────────────────────────────────────────────
+        # ── Single weight update 
         log_probs_t = torch.stack(ep_log_probs)
         entropies_t = torch.stack(ep_entropies)
 
@@ -262,7 +262,7 @@ def main():
         torch.nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
         optimizer.step()
 
-        # ── Curriculum advancement ─────────────────────────────────────────────
+        # ── Curriculum advancement    
         phase_window.append(float(ep_phase_hit))
         if curriculum_phase < 2 and len(phase_window) == curriculum_window:
             hit_rate = sum(phase_window) / len(phase_window)
@@ -276,7 +276,7 @@ def main():
                     flush=True
                 )
 
-        # ── Logging ───────────────────────────────────────────────────────────
+        # ── Logging     
         episode_reward = sum(ep_rewards)
         total_reward  += episode_reward
         reward_history.append(total_reward)
